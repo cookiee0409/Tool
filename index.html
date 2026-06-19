@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cookie Lab — 쉽게 자르기</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- ============ LEFT NAV ============ -->
+      <aside class="app-nav">
+        <div class="nav-brand">
+          <span class="brand-logo" aria-hidden="true">
+            <svg width="32" height="32" viewBox="0 0 34 34" role="img" aria-label="Cookie Lab">
+              <defs>
+                <linearGradient id="cookieBg" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#fb6fab" />
+                  <stop offset="1" stop-color="#a855f7" />
+                </linearGradient>
+              </defs>
+              <rect width="34" height="34" rx="10" fill="url(#cookieBg)" />
+              <circle cx="17" cy="17" r="8.4" fill="#ffe8c2" />
+              <circle cx="13.6" cy="13.8" r="1.5" fill="#8a4b2a" />
+              <circle cx="20" cy="14.6" r="1.2" fill="#8a4b2a" />
+              <circle cx="15.6" cy="20" r="1.4" fill="#8a4b2a" />
+              <circle cx="20.6" cy="19.8" r="1" fill="#8a4b2a" />
+              <circle cx="12.6" cy="18.2" r="0.9" fill="#8a4b2a" />
+            </svg>
+          </span>
+          <span class="brand-name">Cookie Lab</span>
+        </div>
+
+        <nav class="nav-menu" aria-label="주 메뉴">
+          <button type="button" class="nav-item" data-view="edit">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8" /><path d="M5 10v10h14V10" /></svg>
+            홈으로
+          </button>
+          <button type="button" class="nav-item is-active" data-view="edit">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><line x1="20" y1="4" x2="8.1" y2="15.9" /><line x1="14.5" y1="14.5" x2="20" y2="20" /><line x1="8.1" y1="8.1" x2="12" y2="12" /></svg>
+            쉽게 자르기
+          </button>
+          <button type="button" class="nav-item" data-view="works">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+            내 작업
+            <span class="nav-badge" id="navWorksCount" hidden>0</span>
+          </button>
+          <button type="button" class="nav-item" data-view="settings">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M12 2.5v3M12 18.5v3M4.5 4.5l2.1 2.1M17.4 17.4l2.1 2.1M2.5 12h3M18.5 12h3M4.5 19.5l2.1-2.1M17.4 6.6l2.1-2.1" /></svg>
+            설정
+          </button>
+        </nav>
+
+        <div class="nav-promo">
+          <span class="promo-crown" aria-hidden="true">👑</span>
+          <strong>프로로 업그레이드</strong>
+          <small>더 많은 기능을 만나보세요</small>
+        </div>
+      </aside>
+
+      <!-- ============ MAIN ============ -->
+      <main class="app-main">
+        <!-- ---------- EDIT VIEW ---------- -->
+        <section class="view view-edit" id="view-edit" aria-labelledby="page-title">
+          <header class="topbar">
+            <div class="page-head">
+              <h1 id="page-title">쉽게 자르기</h1>
+              <p class="subtitle">잘라서 바로 저장해요 ✂️</p>
+            </div>
+            <div class="status-pill" id="statusPill">이미지를 업로드하세요</div>
+          </header>
+
+          <div class="editor-grid">
+            <section class="canvas-col" aria-label="이미지 작업 영역">
+              <label class="dropzone" id="dropzone">
+                <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+                <span class="upload-icon" aria-hidden="true">+</span>
+                <span class="upload-copy">
+                  <strong id="fileName">이미지 업로드</strong>
+                  <small id="imageMeta">또는 파일을 여기로 끌어오세요</small>
+                </span>
+              </label>
+
+              <div class="stage-wrap" id="stageWrap">
+                <canvas id="stageCanvas" width="960" height="620"></canvas>
+                <div class="stage-empty" id="stageEmpty">이미지를 올리면 커터가 표시됩니다</div>
+                <div class="stage-hint" id="stageHint" aria-hidden="true">
+                  <span><b>확대 / 축소</b> 마우스 휠 · +,−</span>
+                  <span class="hint-sep"></span>
+                  <span><b>화면 이동</b> 우클릭 · 스페이스+드래그</span>
+                </div>
+                <div class="view-toolbar view-toolbar--left" role="group" aria-label="확대 조절">
+                  <button type="button" id="zoomOutBtn" title="축소" aria-label="축소">−</button>
+                  <span id="zoomLabel">100%</span>
+                  <button type="button" id="zoomInBtn" title="확대" aria-label="확대">+</button>
+                  <button type="button" id="fitBtn" class="icon-btn" title="화면 맞춤" aria-label="화면 맞춤">⤢</button>
+                </div>
+              </div>
+            </section>
+
+            <aside class="controls-col" aria-label="자르기 설정">
+              <section class="control-block howto">
+                <div class="block-head">
+                  <h2>사용 방법</h2>
+                </div>
+                <ol class="howto-list">
+                  <li><span class="howto-step">1</span><span>이미지를 업로드해요</span></li>
+                  <li><span class="howto-step">2</span><span>도형을 골라 이미지 위에 드래그해 그리고, 자르기를 눌러요</span></li>
+                  <li><span class="howto-step">3</span><span>만들어진 파일을 저장해요</span></li>
+                </ol>
+              </section>
+
+              <!-- merged: cutter size + shape -->
+              <section class="control-block">
+                <div class="block-head">
+                  <h2>커터 · 도형</h2>
+                  <span id="cutterMeta">드래그해서 그리기</span>
+                </div>
+                <div class="quick-row">
+                  <button class="quick-btn size-preset" data-size="1080x1920">릴스</button>
+                  <button class="quick-btn size-preset" data-size="1080x1350">피드</button>
+                  <button class="quick-btn shape-quick" data-shape="rect">사각형</button>
+                  <div class="shape-picker">
+                    <button type="button" class="quick-btn picker-btn" id="shapePickBtn" aria-expanded="false" aria-controls="shapePopup">
+                      도형 선택 <span class="caret">▾</span>
+                    </button>
+                    <div class="shape-popup" id="shapePopup" hidden>
+                      <p class="popup-label">도형</p>
+                      <div class="shape-grid" role="group" aria-label="커터 도형">
+                        <button class="shape-btn is-active" data-shape="rect" title="사각형" aria-label="사각형">▭</button>
+                        <button class="shape-btn" data-shape="round" title="둥근 사각형" aria-label="둥근 사각형">▢</button>
+                        <button class="shape-btn" data-shape="ellipse" title="원형" aria-label="원형">○</button>
+                        <button class="shape-btn" data-shape="triangle" title="삼각형" aria-label="삼각형">△</button>
+                        <button class="shape-btn" data-shape="diamond" title="마름모" aria-label="마름모">◇</button>
+                        <button class="shape-btn" data-shape="star" title="별" aria-label="별">☆</button>
+                        <button class="shape-btn wide" data-shape="freeform" title="자유형 선택" aria-label="자유형 선택">자유형</button>
+                      </div>
+                      <p class="popup-label">크기 프리셋</p>
+                      <div class="preset-row">
+                        <button class="size-preset" data-size="1080x1080">정사각</button>
+                        <button class="size-preset" data-size="1920x1080">가로형</button>
+                        <button class="size-preset" data-size="1200x628">광고</button>
+                        <button class="size-preset" data-size="720x720">소형</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="size-row">
+                  <label>
+                    가로 (px)
+                    <input id="cropWidth" type="number" min="20" max="8000" value="1080" />
+                  </label>
+                  <button type="button" id="ratioLock" class="ratio-lock" title="가로·세로 비율 잠금" aria-pressed="false" aria-label="비율 잠금">🔗</button>
+                  <label>
+                    세로 (px)
+                    <input id="cropHeight" type="number" min="20" max="8000" value="1920" />
+                  </label>
+                </div>
+              </section>
+
+              <!-- crop action -->
+              <section class="control-block">
+                <div class="block-head">
+                  <h2>자르기</h2>
+                  <span id="shapeMeta" class="shape-meta">사각형</span>
+                </div>
+                <label class="toggle-line">
+                  <input id="stampOnClick" type="checkbox" checked />
+                  도형 안을 클릭하면 바로 자르기
+                </label>
+                <button class="primary grad" id="stampBtn" disabled>현재 영역 자르기</button>
+              </section>
+
+            </aside>
+          </div>
+
+          <div class="output-grid">
+            <section class="results-panel" aria-label="찍어낸 파일">
+            <div class="results-head">
+              <div class="page-head">
+                <h2>찍어낸 파일 <span id="saveMeta" class="count-chip">0개</span></h2>
+                <p class="results-hint" id="resultHint">자른 파일이 여기에 바로 나타나요</p>
+              </div>
+              <div class="works-actions">
+                <button id="downloadAllBtn" disabled>ZIP 전체 저장</button>
+                <button id="clearBtn" class="ghost-danger" disabled>결과 비우기</button>
+              </div>
+            </div>
+            <div class="empty-state" id="resultEmpty">아직 만든 파일이 없어요</div>
+            <div class="result-grid" id="resultGrid"></div>
+            </section>
+
+            <section class="control-block save-options" aria-label="저장 옵션">
+              <div class="block-head">
+                <h2>저장 옵션</h2>
+              </div>
+              <div class="number-row">
+                <label>
+                  파일 접두어
+                  <input id="filePrefix" type="text" value="crop" />
+                </label>
+                <label>
+                  형식
+                  <select id="formatSelect">
+                    <option value="image/png">PNG</option>
+                    <option value="image/jpeg">JPG</option>
+                    <option value="image/webp">WebP</option>
+                  </select>
+                </label>
+              </div>
+
+              <button type="button" class="detail-toggle" id="exportToggle" aria-expanded="false" aria-controls="exportDetail">
+                <span>저장 해상도 설정</span>
+                <span class="detail-caret">자세히 ▾</span>
+              </button>
+              <div class="export-detail" id="exportDetail" hidden>
+                <div class="export-current">
+                  현재 커터 크기
+                  <strong id="exportCurrent">— × —</strong>
+                </div>
+                <div class="seg" role="group" aria-label="저장 해상도 방식">
+                  <button type="button" class="seg-btn is-active" data-export="native">원본</button>
+                  <button type="button" class="seg-btn" data-export="scale">배율 %</button>
+                  <button type="button" class="seg-btn" data-export="custom">직접 입력</button>
+                </div>
+                <div class="export-fields" id="exportScaleField">
+                  <label>
+                    배율 (%)
+                    <input id="exportScale" type="number" min="1" max="1000" step="5" value="100" />
+                  </label>
+                  <p class="export-preview" id="exportPreview">저장 크기 — × —</p>
+                </div>
+                <div class="export-fields export-fields--two" id="exportCustomField" hidden>
+                  <label>
+                    가로 (px)
+                    <input id="exportWidth" type="number" min="1" max="20000" value="1080" />
+                  </label>
+                  <label>
+                    세로 (px)
+                    <input id="exportHeight" type="number" min="1" max="20000" value="1080" />
+                  </label>
+                </div>
+              </div>
+
+              <label class="toggle-line">
+                <input id="autoDownload" type="checkbox" />
+                저장할 때마다 바로 다운로드
+              </label>
+            </section>
+          </div>
+        </section>
+
+        <!-- ---------- WORKS VIEW ---------- -->
+        <section class="view view-works" id="view-works" hidden aria-label="내 작업">
+          <header class="topbar">
+            <div class="page-head">
+              <h1>내 작업</h1>
+              <p class="subtitle" id="worksHint">지금까지 만든 파일이 여기에 모여요</p>
+            </div>
+            <div class="works-actions">
+              <button id="downloadAllWorks" disabled>ZIP 전체 저장</button>
+              <button id="clearWorks" class="ghost-danger" disabled>전체 삭제</button>
+            </div>
+          </header>
+          <div class="works-body">
+            <div class="empty-state" id="worksEmpty">아직 만든 작업이 없어요</div>
+            <div class="result-grid" id="worksGrid"></div>
+          </div>
+        </section>
+
+        <!-- ---------- SETTINGS VIEW ---------- -->
+        <section class="view view-settings" id="view-settings" hidden aria-label="설정">
+          <header class="topbar">
+            <div class="page-head">
+              <h1>설정</h1>
+              <p class="subtitle">앱 환경설정</p>
+            </div>
+          </header>
+          <div class="settings-body">
+            <section class="control-block">
+              <div class="block-head"><h2>화면 테마</h2></div>
+              <div class="seg" role="group" aria-label="테마">
+                <button type="button" class="seg-btn is-active" data-theme="light">라이트</button>
+                <button type="button" class="seg-btn" data-theme="dark">다크</button>
+              </div>
+            </section>
+            <section class="control-block">
+              <div class="block-head"><h2>작업 저장</h2></div>
+              <p class="block-note">
+                잘라낸 파일은 이 브라우저(IndexedDB)에 저장되어 <strong>내 작업</strong> 탭에서 다시 볼 수 있어요.
+                다른 기기로는 동기화되지 않습니다.
+              </p>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
