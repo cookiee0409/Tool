@@ -40,6 +40,14 @@
             <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><line x1="20" y1="4" x2="8.1" y2="15.9" /><line x1="14.5" y1="14.5" x2="20" y2="20" /><line x1="8.1" y1="8.1" x2="12" y2="12" /></svg>
             쉽게 자르기
           </button>
+          <button type="button" class="nav-item" data-view="batch">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="12" height="12" rx="2" /><path d="M8 9h12v10a2 2 0 0 1-2 2H8z" /><path d="M10 13h4M12 11v4" /></svg>
+            일괄 붙여넣기
+          </button>
+          <button type="button" class="nav-item" data-view="rename">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>
+            파일명 일괄 변경
+          </button>
           <button type="button" class="nav-item" data-view="works">
             <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
             내 작업
@@ -250,6 +258,166 @@
           </div>
         </section>
 
+        <!-- ---------- BATCH PASTE VIEW ---------- -->
+        <section class="view view-batch" id="view-batch" hidden aria-labelledby="batch-title">
+          <header class="topbar">
+            <div class="page-head">
+              <h1 id="batch-title">일괄 붙여넣기</h1>
+              <p class="subtitle">여러 이미지에 같은 이미지를 한 번에 붙여넣어요</p>
+            </div>
+            <div class="status-pill" id="batchStatus">원본 이미지를 업로드하세요</div>
+          </header>
+
+          <div class="batch-upload-grid">
+            <section class="control-block batch-source-block">
+              <div class="block-head">
+                <h2>원본 이미지 업로드</h2>
+                <span id="batchSourceCount" class="count-chip">0개</span>
+              </div>
+              <label class="batch-dropzone" id="batchSourceDropzone">
+                <input id="batchSourceInput" type="file" accept="image/png,image/jpeg,image/webp" multiple />
+                <span class="upload-icon" aria-hidden="true">+</span>
+                <span><strong>여러 이미지를 한 번에 업로드하세요</strong><small>JPG, PNG, WebP · 최대 50개</small></span>
+              </label>
+              <div class="batch-file-grid" id="batchSourceGrid"></div>
+            </section>
+
+            <section class="control-block batch-overlay-block">
+              <div class="block-head"><h2>붙여넣을 이미지</h2></div>
+              <label class="overlay-dropzone" id="batchOverlayDropzone">
+                <input id="batchOverlayInput" type="file" accept="image/png,image/jpeg,image/webp" />
+                <div class="overlay-preview" id="batchOverlayPreview">이미지 선택</div>
+                <strong id="batchOverlayName">붙여넣을 파일을 업로드하세요</strong>
+                <small>투명 PNG를 권장해요</small>
+              </label>
+            </section>
+          </div>
+
+          <section class="control-block batch-preview-block">
+            <div class="block-head">
+              <h2>미리보기</h2>
+              <span id="batchPreviewName">선택된 원본 없음</span>
+            </div>
+            <div class="batch-preview-wrap">
+              <canvas id="batchPreviewCanvas" width="900" height="480"></canvas>
+              <div class="stage-empty" id="batchPreviewEmpty">원본 이미지와 붙여넣을 이미지를 업로드하세요</div>
+            </div>
+            <div class="batch-preview-footer">
+              <div>
+                <p class="batch-preview-hint">이미지를 드래그해 이동하고, 모서리로 크기를 조절하세요.</p>
+                <div class="batch-progress" id="batchProgress" hidden>
+                  <span id="batchProgressText">0 / 0</span>
+                  <progress id="batchProgressBar" value="0" max="1"></progress>
+                </div>
+              </div>
+              <div class="batch-preview-actions">
+                <button class="primary grad" id="batchRunBtn" disabled>일괄 붙여넣기</button>
+                <button type="button" class="cancel-btn" id="batchCancelBtn" disabled>실행 취소</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="results-panel batch-results-panel" aria-label="완성된 파일">
+            <div class="results-head">
+              <div class="page-head">
+                <h2>완성된 파일 <span id="batchResultCount" class="count-chip">0개</span></h2>
+                <p class="results-hint" id="batchResultHint">붙여넣기 완료 후 파일이 여기에 표시됩니다</p>
+              </div>
+              <div class="works-actions">
+                <details class="batch-save-menu">
+                  <summary>저장 옵션</summary>
+                  <div class="batch-save-popover">
+                    <div class="number-row">
+                      <label>파일 접두어<input id="batchPrefix" type="text" value="pasted" /></label>
+                      <label>형식<select id="batchFormat"><option value="image/png">PNG</option><option value="image/jpeg">JPG</option><option value="image/webp">WebP</option></select></label>
+                    </div>
+                    <label class="toggle-line"><input id="batchAutoDownload" type="checkbox" />완료할 때마다 바로 다운로드</label>
+                  </div>
+                </details>
+                <button id="batchDownloadAll" disabled>ZIP 전체 저장</button>
+                <button id="batchClearResults" class="ghost-danger" disabled>결과 비우기</button>
+              </div>
+            </div>
+            <div class="empty-state" id="batchResultEmpty">아직 완성된 파일이 없어요</div>
+            <div class="result-grid" id="batchResultGrid"></div>
+          </section>
+        </section>
+
+        <!-- ---------- RENAME VIEW ---------- -->
+        <section class="view view-rename" id="view-rename" hidden aria-labelledby="rename-title">
+          <header class="topbar">
+            <div class="page-head">
+              <h1 id="rename-title">파일명 일괄 변경</h1>
+              <p class="subtitle">여러 파일을 올려 이름을 한꺼번에 또는 하나씩 바꿔요</p>
+            </div>
+            <div class="status-pill" id="renameStatus">파일을 업로드하세요</div>
+          </header>
+
+          <div class="rename-grid">
+            <div class="rename-main">
+              <section class="control-block">
+                <div class="block-head">
+                  <h2>파일 업로드</h2>
+                  <span id="renameCount" class="count-chip">0개</span>
+                </div>
+                <label class="batch-dropzone" id="renameDropzone">
+                  <input id="renameInput" type="file" multiple />
+                  <span class="upload-icon" aria-hidden="true">+</span>
+                  <span><strong>여러 파일을 한 번에 올리세요</strong><small>이미지·문서 등 모든 형식 · 여기로 끌어와도 돼요</small></span>
+                </label>
+              </section>
+
+              <section class="control-block">
+                <div class="block-head">
+                  <h2>파일 목록 · 하나씩 변경</h2>
+                  <span class="block-sub">새 이름을 직접 입력할 수 있어요</span>
+                </div>
+                <div class="empty-state" id="renameEmpty">업로드한 파일이 여기에 표시됩니다</div>
+                <div class="rename-list" id="renameList"></div>
+              </section>
+            </div>
+
+            <aside class="rename-controls">
+              <section class="control-block">
+                <div class="block-head"><h2>한꺼번에 변경</h2></div>
+                <div class="seg" id="renameModeSeg" role="group" aria-label="변경 방식">
+                  <button type="button" class="seg-btn is-active" data-rmode="number">번호 매기기</button>
+                  <button type="button" class="seg-btn" data-rmode="replace">찾기·바꾸기</button>
+                  <button type="button" class="seg-btn" data-rmode="affix">접두·접미</button>
+                </div>
+
+                <div class="rename-fields" id="renameNumberFields">
+                  <label>기준 이름<input id="renameBase" type="text" placeholder="예: photo" /></label>
+                  <div class="number-row">
+                    <label>시작 번호<input id="renameStart" type="number" min="0" value="1" /></label>
+                    <label>자릿수<input id="renameDigits" type="number" min="1" max="6" value="3" /></label>
+                  </div>
+                  <p class="block-note">예: photo_001, photo_002 …</p>
+                </div>
+
+                <div class="rename-fields" id="renameReplaceFields" hidden>
+                  <label>찾을 내용<input id="renameFind" type="text" placeholder="바꿀 글자" /></label>
+                  <label>바꿀 내용<input id="renameReplace" type="text" placeholder="새 글자" /></label>
+                </div>
+
+                <div class="rename-fields" id="renameAffixFields" hidden>
+                  <label>접두어 (앞)<input id="renamePrefix" type="text" placeholder="예: 2026_" /></label>
+                  <label>접미어 (뒤)<input id="renameSuffix" type="text" placeholder="예: _final" /></label>
+                </div>
+
+                <button class="primary grad" id="renameApplyAll" disabled>전체 적용</button>
+                <button type="button" id="renameReset" class="ghost-danger" disabled>원래 이름으로</button>
+              </section>
+
+              <section class="control-block">
+                <div class="block-head"><h2>저장</h2></div>
+                <p class="block-note">브라우저는 원본 파일을 직접 바꿀 수 없어, 새 이름으로 다운로드해요.</p>
+                <button class="primary grad" id="renameDownloadAll" disabled>전체 ZIP로 저장</button>
+              </section>
+            </aside>
+          </div>
+        </section>
+
         <!-- ---------- WORKS VIEW ---------- -->
         <section class="view view-works" id="view-works" hidden aria-label="내 작업">
           <header class="topbar">
@@ -257,14 +425,34 @@
               <h1>내 작업</h1>
               <p class="subtitle" id="worksHint">지금까지 만든 파일이 여기에 모여요</p>
             </div>
-            <div class="works-actions">
-              <button id="downloadAllWorks" disabled>ZIP 전체 저장</button>
-              <button id="clearWorks" class="ghost-danger" disabled>전체 삭제</button>
-            </div>
           </header>
-          <div class="works-body">
-            <div class="empty-state" id="worksEmpty">아직 만든 작업이 없어요</div>
-            <div class="result-grid" id="worksGrid"></div>
+          <div class="works-body works-groups">
+            <section class="works-group">
+              <div class="works-group-head">
+                <h2>쉽게 자르기 <span id="worksCropCount" class="count-chip">0개</span></h2>
+                <div class="works-actions"><button id="downloadAllWorks" disabled>ZIP 전체 저장</button><button id="clearWorks" class="ghost-danger" disabled>전체 삭제</button></div>
+              </div>
+              <div class="empty-state" id="worksEmpty">아직 잘라낸 파일이 없어요</div>
+              <div class="result-grid" id="worksGrid"></div>
+            </section>
+
+            <section class="works-group">
+              <div class="works-group-head">
+                <h2>일괄 붙여넣기 <span id="worksBatchCount" class="count-chip">0개</span></h2>
+                <div class="works-actions"><button id="downloadBatchWorks" disabled>ZIP 전체 저장</button><button id="clearBatchWorks" class="ghost-danger" disabled>전체 삭제</button></div>
+              </div>
+              <div class="empty-state" id="worksBatchEmpty">아직 일괄 붙여넣기 결과가 없어요</div>
+              <div class="result-grid" id="worksBatchGrid"></div>
+            </section>
+
+            <section class="works-group">
+              <div class="works-group-head">
+                <h2>파일명 일괄 변경 <span id="worksRenameCount" class="count-chip">0개</span></h2>
+                <div class="works-actions"><button id="downloadRenameWorks" disabled>ZIP 전체 저장</button><button id="clearRenameWorks" class="ghost-danger" disabled>전체 삭제</button></div>
+              </div>
+              <div class="empty-state" id="worksRenameEmpty">아직 이름을 변경한 파일이 없어요</div>
+              <div class="works-rename-list" id="worksRenameList"></div>
+            </section>
           </div>
         </section>
 

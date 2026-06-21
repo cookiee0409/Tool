@@ -27,6 +27,17 @@ const worksEmpty = document.getElementById("worksEmpty");
 const saveMeta = document.getElementById("saveMeta");
 const resultHint = document.getElementById("resultHint");
 const worksHint = document.getElementById("worksHint");
+const worksCropCount = document.getElementById("worksCropCount");
+const worksBatchGrid = document.getElementById("worksBatchGrid");
+const worksBatchEmpty = document.getElementById("worksBatchEmpty");
+const worksBatchCount = document.getElementById("worksBatchCount");
+const downloadBatchWorks = document.getElementById("downloadBatchWorks");
+const clearBatchWorks = document.getElementById("clearBatchWorks");
+const worksRenameList = document.getElementById("worksRenameList");
+const worksRenameEmpty = document.getElementById("worksRenameEmpty");
+const worksRenameCount = document.getElementById("worksRenameCount");
+const downloadRenameWorks = document.getElementById("downloadRenameWorks");
+const clearRenameWorks = document.getElementById("clearRenameWorks");
 const shapePickBtn = document.getElementById("shapePickBtn");
 const shapePopup = document.getElementById("shapePopup");
 const zoomInBtn = document.getElementById("zoomInBtn");
@@ -36,6 +47,8 @@ const zoomLabel = document.getElementById("zoomLabel");
 const navItems = document.querySelectorAll(".nav-item");
 const views = {
   edit: document.getElementById("view-edit"),
+  batch: document.getElementById("view-batch"),
+  rename: document.getElementById("view-rename"),
   works: document.getElementById("view-works"),
   settings: document.getElementById("view-settings"),
 };
@@ -50,6 +63,33 @@ const exportScaleField = document.getElementById("exportScaleField");
 const exportCustomField = document.getElementById("exportCustomField");
 const exportCurrent = document.getElementById("exportCurrent");
 const exportPreview = document.getElementById("exportPreview");
+
+const batchStatus = document.getElementById("batchStatus");
+const batchSourceInput = document.getElementById("batchSourceInput");
+const batchSourceDropzone = document.getElementById("batchSourceDropzone");
+const batchSourceGrid = document.getElementById("batchSourceGrid");
+const batchSourceCount = document.getElementById("batchSourceCount");
+const batchOverlayInput = document.getElementById("batchOverlayInput");
+const batchOverlayDropzone = document.getElementById("batchOverlayDropzone");
+const batchOverlayPreview = document.getElementById("batchOverlayPreview");
+const batchOverlayName = document.getElementById("batchOverlayName");
+const batchPreviewCanvas = document.getElementById("batchPreviewCanvas");
+const batchPreviewEmpty = document.getElementById("batchPreviewEmpty");
+const batchPreviewName = document.getElementById("batchPreviewName");
+const batchRunBtn = document.getElementById("batchRunBtn");
+const batchCancelBtn = document.getElementById("batchCancelBtn");
+const batchProgress = document.getElementById("batchProgress");
+const batchProgressText = document.getElementById("batchProgressText");
+const batchProgressBar = document.getElementById("batchProgressBar");
+const batchResultCount = document.getElementById("batchResultCount");
+const batchResultHint = document.getElementById("batchResultHint");
+const batchResultEmpty = document.getElementById("batchResultEmpty");
+const batchResultGrid = document.getElementById("batchResultGrid");
+const batchDownloadAll = document.getElementById("batchDownloadAll");
+const batchClearResults = document.getElementById("batchClearResults");
+const batchPrefix = document.getElementById("batchPrefix");
+const batchFormat = document.getElementById("batchFormat");
+const batchAutoDownload = document.getElementById("batchAutoDownload");
 
 const ctx = stageCanvas.getContext("2d");
 const crcTable = makeCrcTable();
@@ -81,6 +121,15 @@ let isDrawingFreeform = false;
 let activeShape = "rect";
 let freeformPoints = [];
 let generatedCrops = [];
+let batchSources = [];
+let batchOverlay = null;
+let batchSelectedSource = 0;
+let batchOverlayTransform = { x: 0.77, y: 0.77, width: 0.2 };
+let batchPreviewFrame = null;
+let batchOverlayInteraction = null;
+let batchResults = [];
+let batchRunning = false;
+let batchCancelRequested = false;
 
 // New interaction state
 let cropActive = false;
@@ -799,6 +848,8 @@ function renderWorks() {
     worksHint.textContent = has ? `지금까지 ${ordered.length}개의 작업을 만들었어요` : "지금까지 만든 파일이 여기에 모여요";
   }
   if (saveMeta) saveMeta.textContent = `${ordered.length}개`;
+  if (worksCropCount) worksCropCount.textContent = `${ordered.length}개`;
+  updateWorksSummary();
   updateWorksBadge();
 }
 
@@ -1302,9 +1353,15 @@ document.addEventListener("keydown", (event) => {
    ============================================================ */
 function updateWorksBadge() {
   if (!navWorksCount) return;
-  const count = generatedCrops.length;
+  const count = generatedCrops.length + batchResults.length + renameEntries.length;
   navWorksCount.textContent = String(count);
   navWorksCount.hidden = count === 0;
+}
+
+function updateWorksSummary() {
+  if (!worksHint) return;
+  const count = generatedCrops.length + batchResults.length + renameEntries.length;
+  worksHint.textContent = count ? `세 가지 도구에서 만든 작업 ${count}개` : "지금까지 만든 파일이 여기에 모여요";
 }
 
 function getExportSize(width, height) {
@@ -1379,6 +1436,553 @@ document.querySelectorAll(".seg-btn[data-export]").forEach((button) => {
 [exportScaleInput, exportWidthInput, exportHeightInput].forEach((input) => {
   input.addEventListener("input", updateExportInfo);
 });
+
+/* ============================================================
+   Batch paste
+   ============================================================ */
+function setBatchStatus(message) {
+  if (batchStatus) batchStatus.textContent = message;
+}
+
+function loadBatchImage(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type.startsWith("image/")) {
+      reject(new Error("invalid image"));
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => resolve({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      file,
+      image,
+      url,
+    });
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("image load failed"));
+    };
+    image.src = url;
+  });
+}
+
+async function addBatchSources(files) {
+  if (batchRunning) return;
+  const available = Math.max(0, 50 - batchSources.length);
+  const selected = Array.from(files || []).filter((file) => file.type.startsWith("image/")).slice(0, available);
+  if (!selected.length) {
+    setBatchStatus(available ? "사용할 수 있는 이미지 파일이 없어요" : "원본 이미지는 최대 50개까지 추가할 수 있어요");
+    return;
+  }
+  setBatchStatus(`${selected.length}개 이미지를 불러오는 중`);
+  const loaded = await Promise.allSettled(selected.map(loadBatchImage));
+  loaded.forEach((result) => {
+    if (result.status === "fulfilled") batchSources.push(result.value);
+  });
+  if (batchSelectedSource >= batchSources.length) batchSelectedSource = Math.max(0, batchSources.length - 1);
+  renderBatchSources();
+  drawBatchPreview();
+  syncBatchControls();
+  setBatchStatus(`${batchSources.length}개 원본 이미지 준비됨`);
+}
+
+async function setBatchOverlay(file) {
+  if (batchRunning) return;
+  if (!file || !file.type.startsWith("image/")) {
+    setBatchStatus("붙여넣을 이미지 파일을 선택해 주세요");
+    return;
+  }
+  try {
+    const loaded = await loadBatchImage(file);
+    if (batchOverlay) URL.revokeObjectURL(batchOverlay.url);
+    batchOverlay = loaded;
+    batchOverlayPreview.innerHTML = "";
+    const image = document.createElement("img");
+    image.src = loaded.url;
+    image.alt = file.name;
+    batchOverlayPreview.append(image);
+    batchOverlayName.textContent = file.name;
+    resetBatchOverlayTransform();
+    drawBatchPreview();
+    syncBatchControls();
+    setBatchStatus("붙여넣을 이미지 준비됨");
+  } catch (error) {
+    setBatchStatus("붙여넣을 이미지를 읽지 못했어요");
+  }
+}
+
+function renderBatchSources() {
+  batchSourceGrid.innerHTML = "";
+  batchSources.forEach((source, index) => {
+    const card = document.createElement("article");
+    card.className = `batch-file-card${index === batchSelectedSource ? " is-active" : ""}`;
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.setAttribute("aria-label", `${source.file.name} 미리보기`);
+
+    const image = document.createElement("img");
+    image.src = source.url;
+    image.alt = "";
+    const name = document.createElement("span");
+    name.textContent = source.file.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "batch-file-remove";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `${source.file.name} 제거`);
+
+    const select = () => {
+      batchSelectedSource = index;
+      renderBatchSources();
+      drawBatchPreview();
+    };
+    card.addEventListener("click", select);
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        select();
+      }
+    });
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (batchRunning) return;
+      URL.revokeObjectURL(source.url);
+      batchSources.splice(index, 1);
+      batchSelectedSource = Math.min(batchSelectedSource, Math.max(0, batchSources.length - 1));
+      renderBatchSources();
+      drawBatchPreview();
+      syncBatchControls();
+      setBatchStatus(batchSources.length ? `${batchSources.length}개 원본 이미지 준비됨` : "원본 이미지를 업로드하세요");
+    });
+
+    card.append(image, name, remove);
+    batchSourceGrid.append(card);
+  });
+  batchSourceCount.textContent = `${batchSources.length}개`;
+}
+
+function getBatchOverlayRatio() {
+  if (!batchOverlay) return 1;
+  return batchOverlay.image.naturalHeight / batchOverlay.image.naturalWidth;
+}
+
+function getBatchPlacement(baseWidth, baseHeight) {
+  const ratio = getBatchOverlayRatio();
+  const minWidth = Math.min(0.08, 24 / baseWidth);
+  const maxWidth = Math.min(0.96, (baseHeight * 0.96) / (baseWidth * ratio));
+  const widthFraction = Math.min(maxWidth, Math.max(minWidth, batchOverlayTransform.width));
+  const width = baseWidth * widthFraction;
+  const height = width * ratio;
+  const maxX = Math.max(0, baseWidth - width);
+  const maxY = Math.max(0, baseHeight - height);
+  return {
+    x: Math.min(maxX, Math.max(0, batchOverlayTransform.x * baseWidth)),
+    y: Math.min(maxY, Math.max(0, batchOverlayTransform.y * baseHeight)),
+    width,
+    height,
+  };
+}
+
+function constrainBatchOverlayTransform(baseWidth, baseHeight) {
+  if (!batchOverlay) return;
+  const placement = getBatchPlacement(baseWidth, baseHeight);
+  batchOverlayTransform.width = placement.width / baseWidth;
+  batchOverlayTransform.x = placement.x / baseWidth;
+  batchOverlayTransform.y = placement.y / baseHeight;
+}
+
+function resetBatchOverlayTransform() {
+  const source = batchSources[batchSelectedSource];
+  batchOverlayTransform = { x: 0.77, y: 0.77, width: 0.2 };
+  if (!source || !batchOverlay) return;
+  const baseWidth = source.image.naturalWidth;
+  const baseHeight = source.image.naturalHeight;
+  constrainBatchOverlayTransform(baseWidth, baseHeight);
+  const placement = getBatchPlacement(baseWidth, baseHeight);
+  batchOverlayTransform.x = Math.max(0, (baseWidth - placement.width) / baseWidth - 0.03);
+  batchOverlayTransform.y = Math.max(0, (baseHeight - placement.height) / baseHeight - 0.03);
+}
+
+function drawBatchPreview() {
+  const context = batchPreviewCanvas.getContext("2d");
+  const canvasWidth = batchPreviewCanvas.width;
+  const canvasHeight = batchPreviewCanvas.height;
+  context.clearRect(0, 0, canvasWidth, canvasHeight);
+  batchPreviewFrame = null;
+  const source = batchSources[batchSelectedSource];
+  batchPreviewName.textContent = source ? source.file.name : "선택된 원본 없음";
+  batchPreviewEmpty.classList.toggle("is-hidden", Boolean(source && batchOverlay));
+  if (!source) return;
+
+  const baseWidth = source.image.naturalWidth;
+  const baseHeight = source.image.naturalHeight;
+  const scale = Math.min(canvasWidth / baseWidth, canvasHeight / baseHeight);
+  const drawWidth = baseWidth * scale;
+  const drawHeight = baseHeight * scale;
+  const originX = (canvasWidth - drawWidth) / 2;
+  const originY = (canvasHeight - drawHeight) / 2;
+  context.fillStyle = "#ffffff";
+  context.fillRect(originX, originY, drawWidth, drawHeight);
+  context.drawImage(source.image, originX, originY, drawWidth, drawHeight);
+
+  if (batchOverlay) {
+    constrainBatchOverlayTransform(baseWidth, baseHeight);
+    const placement = getBatchPlacement(baseWidth, baseHeight);
+    context.save();
+    context.beginPath();
+    context.rect(originX, originY, drawWidth, drawHeight);
+    context.clip();
+    context.drawImage(
+      batchOverlay.image,
+      originX + placement.x * scale,
+      originY + placement.y * scale,
+      placement.width * scale,
+      placement.height * scale
+    );
+    context.restore();
+
+    const box = {
+      x: originX + placement.x * scale,
+      y: originY + placement.y * scale,
+      width: placement.width * scale,
+      height: placement.height * scale,
+    };
+    const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#e24a99";
+    context.save();
+    context.strokeStyle = accent;
+    context.lineWidth = 2;
+    context.setLineDash([7, 4]);
+    context.strokeRect(box.x, box.y, box.width, box.height);
+    context.setLineDash([]);
+    const handleSize = 10;
+    [
+      [box.x, box.y],
+      [box.x + box.width, box.y],
+      [box.x, box.y + box.height],
+      [box.x + box.width, box.y + box.height],
+    ].forEach(([x, y]) => {
+      context.fillStyle = "#ffffff";
+      context.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+      context.strokeStyle = accent;
+      context.strokeRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+    });
+    context.restore();
+    batchPreviewFrame = { originX, originY, scale, baseWidth, baseHeight, box };
+  }
+}
+
+function getBatchPreviewPoint(event) {
+  const rect = batchPreviewCanvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * (batchPreviewCanvas.width / rect.width),
+    y: (event.clientY - rect.top) * (batchPreviewCanvas.height / rect.height),
+  };
+}
+
+function getBatchNormalizedPoint(point, frame = batchPreviewFrame) {
+  return {
+    x: (point.x - frame.originX) / (frame.scale * frame.baseWidth),
+    y: (point.y - frame.originY) / (frame.scale * frame.baseHeight),
+  };
+}
+
+function getBatchOverlayHandle(point) {
+  if (!batchPreviewFrame) return null;
+  const box = batchPreviewFrame.box;
+  const hitRadius = 12;
+  const handles = [
+    { name: "nw", x: box.x, y: box.y, cursor: "nwse-resize" },
+    { name: "ne", x: box.x + box.width, y: box.y, cursor: "nesw-resize" },
+    { name: "sw", x: box.x, y: box.y + box.height, cursor: "nesw-resize" },
+    { name: "se", x: box.x + box.width, y: box.y + box.height, cursor: "nwse-resize" },
+  ];
+  return handles.find((handle) => Math.hypot(point.x - handle.x, point.y - handle.y) <= hitRadius) || null;
+}
+
+function pointInsideBatchOverlay(point) {
+  if (!batchPreviewFrame) return false;
+  const box = batchPreviewFrame.box;
+  return point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
+}
+
+function updateBatchPreviewCursor(point) {
+  const handle = getBatchOverlayHandle(point);
+  batchPreviewCanvas.style.cursor = handle ? handle.cursor : pointInsideBatchOverlay(point) ? "grab" : "default";
+}
+
+batchPreviewCanvas.addEventListener("pointerdown", (event) => {
+  if (batchRunning || !batchPreviewFrame || event.button !== 0) return;
+  const point = getBatchPreviewPoint(event);
+  const handle = getBatchOverlayHandle(point);
+  if (!handle && !pointInsideBatchOverlay(point)) return;
+  const start = getBatchNormalizedPoint(point);
+  const ratio = getBatchOverlayRatio();
+  const originalHeight = batchOverlayTransform.width * batchPreviewFrame.baseWidth * ratio / batchPreviewFrame.baseHeight;
+  batchOverlayInteraction = {
+    type: handle ? "resize" : "move",
+    handle: handle ? handle.name : null,
+    start,
+    original: { ...batchOverlayTransform, height: originalHeight },
+  };
+  batchPreviewCanvas.setPointerCapture(event.pointerId);
+  batchPreviewCanvas.style.cursor = handle ? handle.cursor : "grabbing";
+});
+
+batchPreviewCanvas.addEventListener("pointermove", (event) => {
+  if (!batchPreviewFrame) return;
+  const point = getBatchPreviewPoint(event);
+  if (!batchOverlayInteraction) {
+    updateBatchPreviewCursor(point);
+    return;
+  }
+  const current = getBatchNormalizedPoint(point);
+  const interaction = batchOverlayInteraction;
+  const dx = current.x - interaction.start.x;
+  const dy = current.y - interaction.start.y;
+  if (interaction.type === "move") {
+    batchOverlayTransform.x = interaction.original.x + dx;
+    batchOverlayTransform.y = interaction.original.y + dy;
+  } else {
+    const ratio = getBatchOverlayRatio();
+    const widthFromX = interaction.original.width + (interaction.handle.includes("e") ? dx : -dx);
+    const widthDeltaFromY = dy * batchPreviewFrame.baseHeight / (batchPreviewFrame.baseWidth * ratio);
+    const widthFromY = interaction.original.width + (interaction.handle.includes("s") ? widthDeltaFromY : -widthDeltaFromY);
+    const newWidth = Math.abs(widthFromX - interaction.original.width) >= Math.abs(widthFromY - interaction.original.width)
+      ? widthFromX
+      : widthFromY;
+    const newHeight = newWidth * batchPreviewFrame.baseWidth * ratio / batchPreviewFrame.baseHeight;
+    batchOverlayTransform.width = newWidth;
+    batchOverlayTransform.x = interaction.handle.includes("w")
+      ? interaction.original.x + interaction.original.width - newWidth
+      : interaction.original.x;
+    batchOverlayTransform.y = interaction.handle.includes("n")
+      ? interaction.original.y + interaction.original.height - newHeight
+      : interaction.original.y;
+  }
+  constrainBatchOverlayTransform(batchPreviewFrame.baseWidth, batchPreviewFrame.baseHeight);
+  drawBatchPreview();
+});
+
+function endBatchOverlayInteraction(event) {
+  if (!batchOverlayInteraction) return;
+  batchOverlayInteraction = null;
+  try {
+    batchPreviewCanvas.releasePointerCapture(event.pointerId);
+  } catch (error) {
+    /* pointer capture already released */
+  }
+  updateBatchPreviewCursor(getBatchPreviewPoint(event));
+}
+
+batchPreviewCanvas.addEventListener("pointerup", endBatchOverlayInteraction);
+batchPreviewCanvas.addEventListener("pointercancel", endBatchOverlayInteraction);
+
+function syncBatchControls() {
+  const ready = batchSources.length > 0 && Boolean(batchOverlay);
+  batchRunBtn.disabled = !ready || batchRunning;
+  batchCancelBtn.disabled = !batchRunning || batchCancelRequested;
+  batchRunBtn.textContent = batchRunning
+    ? "처리 중..."
+    : ready ? `${batchSources.length}개 일괄 붙여넣기` : "일괄 붙여넣기";
+  [batchSourceInput, batchOverlayInput, batchPrefix, batchFormat].forEach((control) => {
+    control.disabled = batchRunning;
+  });
+}
+
+function buildBatchResultCard(item) {
+  const card = document.createElement("article");
+  card.className = "tile-card";
+  const image = document.createElement("img");
+  image.src = item.url;
+  image.alt = item.file;
+  const footer = document.createElement("div");
+  footer.className = "tile-footer";
+  const name = document.createElement("strong");
+  name.className = "tile-name";
+  name.textContent = item.file;
+  const dim = document.createElement("span");
+  dim.className = "tile-dim";
+  dim.textContent = `${item.width} × ${item.height}px`;
+  const actions = document.createElement("div");
+  actions.className = "tile-actions";
+  const link = document.createElement("a");
+  link.href = item.url;
+  link.download = item.file;
+  link.textContent = "저장";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "tile-remove";
+  remove.textContent = "삭제";
+  remove.addEventListener("click", () => {
+    if (!batchRunning) removeBatchResult(item.id);
+  });
+  actions.append(link, remove);
+  footer.append(name, dim, actions);
+  card.append(image, footer);
+  return card;
+}
+
+function renderBatchResults() {
+  [batchResultGrid, worksBatchGrid].forEach((grid) => {
+    grid.innerHTML = "";
+    batchResults.slice().reverse().forEach((item) => grid.append(buildBatchResultCard(item)));
+  });
+  const hasResults = batchResults.length > 0;
+  batchResultEmpty.classList.toggle("is-hidden", hasResults);
+  worksBatchEmpty.classList.toggle("is-hidden", hasResults);
+  batchDownloadAll.disabled = !hasResults || batchRunning;
+  downloadBatchWorks.disabled = !hasResults || batchRunning;
+  batchClearResults.disabled = !hasResults || batchRunning;
+  clearBatchWorks.disabled = !hasResults || batchRunning;
+  batchResultCount.textContent = `${batchResults.length}개`;
+  worksBatchCount.textContent = `${batchResults.length}개`;
+  batchResultHint.textContent = hasResults ? `완성된 파일 ${batchResults.length}개` : "붙여넣기 완료 후 파일이 여기에 표시됩니다";
+  updateWorksSummary();
+  updateWorksBadge();
+}
+
+function removeBatchResult(id) {
+  const index = batchResults.findIndex((item) => item.id === id);
+  if (index === -1) return;
+  const [item] = batchResults.splice(index, 1);
+  URL.revokeObjectURL(item.url);
+  renderBatchResults();
+}
+
+function clearBatchResults() {
+  if (batchRunning || !batchResults.length) return;
+  batchResults.forEach((item) => URL.revokeObjectURL(item.url));
+  batchResults = [];
+  renderBatchResults();
+  setBatchStatus("결과를 비웠어요");
+}
+
+async function runBatchPaste() {
+  if (batchRunning || !batchSources.length || !batchOverlay) return;
+  batchRunning = true;
+  batchCancelRequested = false;
+  batchProgress.hidden = false;
+  batchProgressBar.max = batchSources.length;
+  batchProgressBar.value = 0;
+  batchProgressText.textContent = `0 / ${batchSources.length}`;
+  syncBatchControls();
+  renderBatchResults();
+
+  const mimeType = batchFormat.value;
+  const extension = mimeType.split("/")[1].replace("jpeg", "jpg");
+  const safePrefix = (batchPrefix.value || "pasted").trim().replace(/[\\/:*?"<>|]+/g, "-") || "pasted";
+  let completed = 0;
+  let failed = false;
+
+  try {
+    for (const source of batchSources) {
+      if (batchCancelRequested) break;
+      setBatchStatus(`${source.file.name} 처리 중`);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+
+      const output = document.createElement("canvas");
+      output.width = source.image.naturalWidth;
+      output.height = source.image.naturalHeight;
+      const context = output.getContext("2d");
+      if (mimeType === "image/jpeg") {
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, output.width, output.height);
+      }
+      context.drawImage(source.image, 0, 0);
+      const placement = getBatchPlacement(output.width, output.height);
+      context.drawImage(batchOverlay.image, placement.x, placement.y, placement.width, placement.height);
+
+      const blob = await canvasToBlob(output, mimeType);
+      const originalName = source.file.name.replace(/\.[^.]+$/, "");
+      const serial = String(batchResults.length + 1).padStart(3, "0");
+      const item = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        blob,
+        url: URL.createObjectURL(blob),
+        file: `${safePrefix}_${serial}_${originalName}.${extension}`,
+        width: output.width,
+        height: output.height,
+        date: Date.now(),
+      };
+      batchResults.push(item);
+      completed += 1;
+      batchProgressBar.value = completed;
+      batchProgressText.textContent = `${completed} / ${batchSources.length}`;
+      renderBatchResults();
+      if (batchAutoDownload.checked) downloadOne(item);
+    }
+  } catch (error) {
+    failed = true;
+  } finally {
+    const cancelled = batchCancelRequested;
+    batchRunning = false;
+    batchCancelRequested = false;
+    syncBatchControls();
+    renderBatchResults();
+    setBatchStatus(
+      failed
+        ? `처리 중 오류 발생 · ${completed}개 완료`
+        : cancelled ? `실행 취소됨 · ${completed}개 완료` : `일괄 붙여넣기 완료 · ${completed}개`
+    );
+  }
+}
+
+function cancelBatchPaste() {
+  if (!batchRunning) return;
+  batchCancelRequested = true;
+  batchCancelBtn.disabled = true;
+  setBatchStatus("현재 파일 처리 후 실행을 취소합니다");
+}
+
+async function downloadBatchZip() {
+  if (!batchResults.length) return;
+  setBatchStatus("ZIP 파일 생성 중");
+  const files = [];
+  for (const item of batchResults) {
+    files.push({ name: item.file, bytes: new Uint8Array(await item.blob.arrayBuffer()) });
+  }
+  const blob = makeZip(files);
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `batch-paste_${Date.now()}.zip`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  setBatchStatus("ZIP 저장 완료");
+}
+
+function wireBatchDropzone(element, onFiles) {
+  ["dragenter", "dragover"].forEach((eventName) => {
+    element.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      element.classList.add("is-dragover");
+    });
+  });
+  ["dragleave", "drop"].forEach((eventName) => {
+    element.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      element.classList.remove("is-dragover");
+    });
+  });
+  element.addEventListener("drop", (event) => onFiles(event.dataTransfer.files));
+}
+
+batchSourceInput.addEventListener("change", (event) => {
+  addBatchSources(event.target.files);
+  event.target.value = "";
+});
+batchOverlayInput.addEventListener("change", (event) => {
+  setBatchOverlay(event.target.files[0]);
+  event.target.value = "";
+});
+wireBatchDropzone(batchSourceDropzone, addBatchSources);
+wireBatchDropzone(batchOverlayDropzone, (files) => setBatchOverlay(files[0]));
+batchRunBtn.addEventListener("click", runBatchPaste);
+batchCancelBtn.addEventListener("click", cancelBatchPaste);
+batchDownloadAll.addEventListener("click", downloadBatchZip);
+batchClearResults.addEventListener("click", clearBatchResults);
 
 /* ============================================================
    IndexedDB — persistent "내 작업" store
@@ -1460,6 +2064,7 @@ function setView(name, navButton) {
   navItems.forEach((button) => button.classList.remove("is-active"));
   if (navButton) navButton.classList.add("is-active");
   if (name === "edit") requestAnimationFrame(resizeCanvasToStage);
+  if (name === "batch") requestAnimationFrame(drawBatchPreview);
 }
 
 navItems.forEach((button) => {
@@ -1499,6 +2104,303 @@ clearBtn.addEventListener("click", resetResults);
 downloadAllWorks.addEventListener("click", downloadZip);
 clearWorks.addEventListener("click", resetResults);
 
+/* ============================================================
+   파일명 일괄 변경 (batch rename)
+   ============================================================ */
+const renameInput = document.getElementById("renameInput");
+const renameDropzone = document.getElementById("renameDropzone");
+const renameList = document.getElementById("renameList");
+const renameEmpty = document.getElementById("renameEmpty");
+const renameCount = document.getElementById("renameCount");
+const renameStatus = document.getElementById("renameStatus");
+const renameApplyAll = document.getElementById("renameApplyAll");
+const renameReset = document.getElementById("renameReset");
+const renameDownloadAll = document.getElementById("renameDownloadAll");
+const renameBase = document.getElementById("renameBase");
+const renameStart = document.getElementById("renameStart");
+const renameDigits = document.getElementById("renameDigits");
+const renameFind = document.getElementById("renameFind");
+const renameReplace = document.getElementById("renameReplace");
+const renamePrefix = document.getElementById("renamePrefix");
+const renameSuffix = document.getElementById("renameSuffix");
+const renameNumberFields = document.getElementById("renameNumberFields");
+const renameReplaceFields = document.getElementById("renameReplaceFields");
+const renameAffixFields = document.getElementById("renameAffixFields");
+
+let renameEntries = [];
+let renameMode = "number";
+
+function setRenameStatus(message) {
+  if (renameStatus) renameStatus.textContent = message;
+}
+
+function splitFileName(name) {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return { base: name, ext: "" };
+  return { base: name.slice(0, dot), ext: name.slice(dot) };
+}
+
+function safeRenameBase(value, fallback) {
+  const base = (value || fallback || "file").trim().replace(/[\\/:*?"<>|]+/g, "-");
+  return base || "file";
+}
+
+function renameFinalName(entry) {
+  return safeRenameBase(entry.newBase, entry.base) + entry.ext;
+}
+
+function addRenameFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  files.forEach((file) => {
+    const { base, ext } = splitFileName(file.name);
+    const isImage = file.type.startsWith("image/");
+    renameEntries.push({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      file,
+      originalName: file.name,
+      base,
+      ext,
+      newBase: base,
+      isImage,
+      url: isImage ? URL.createObjectURL(file) : "",
+    });
+  });
+  renderRenameList();
+  setRenameStatus(`${renameEntries.length}개 파일 준비됨`);
+}
+
+function removeRenameEntry(id) {
+  const index = renameEntries.findIndex((entry) => entry.id === id);
+  if (index === -1) return;
+  if (renameEntries[index].url) URL.revokeObjectURL(renameEntries[index].url);
+  renameEntries.splice(index, 1);
+  renderRenameList();
+}
+
+function renderRenameList() {
+  const has = renameEntries.length > 0;
+  renameList.innerHTML = "";
+  renameEmpty.classList.toggle("is-hidden", has);
+  renameCount.textContent = `${renameEntries.length}개`;
+  renameApplyAll.disabled = !has;
+  renameReset.disabled = !has;
+  renameDownloadAll.disabled = !has;
+
+  renameEntries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "rename-row";
+
+    const thumb = document.createElement("div");
+    thumb.className = "rename-thumb";
+    if (entry.isImage) {
+      const img = document.createElement("img");
+      img.src = entry.url;
+      img.alt = entry.originalName;
+      thumb.append(img);
+    } else {
+      thumb.classList.add("is-file");
+      thumb.textContent = (entry.ext.replace(".", "").toUpperCase() || "FILE").slice(0, 4);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "rename-meta";
+    const orig = document.createElement("span");
+    orig.className = "rename-orig";
+    orig.textContent = entry.originalName;
+    const field = document.createElement("div");
+    field.className = "rename-field";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = entry.newBase;
+    input.setAttribute("aria-label", `${entry.originalName} 새 이름`);
+    input.addEventListener("input", () => {
+      entry.newBase = input.value;
+      renderRenameWorks();
+    });
+    const ext = document.createElement("span");
+    ext.className = "rename-ext";
+    ext.textContent = entry.ext || "(확장자 없음)";
+    field.append(input, ext);
+    meta.append(orig, field);
+
+    const actions = document.createElement("div");
+    actions.className = "rename-row-actions";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "mini-btn";
+    save.textContent = "저장";
+    save.addEventListener("click", () => downloadBlobAs(entry.file, renameFinalName(entry)));
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "mini-btn danger";
+    del.textContent = "✕";
+    del.title = "목록에서 제거";
+    del.setAttribute("aria-label", "목록에서 제거");
+    del.addEventListener("click", () => removeRenameEntry(entry.id));
+    actions.append(save, del);
+
+    row.append(thumb, meta, actions);
+    renameList.append(row);
+  });
+  renderRenameWorks();
+}
+
+function renderRenameWorks() {
+  const has = renameEntries.length > 0;
+  worksRenameList.innerHTML = "";
+  worksRenameEmpty.classList.toggle("is-hidden", has);
+  worksRenameCount.textContent = `${renameEntries.length}개`;
+  downloadRenameWorks.disabled = !has;
+  clearRenameWorks.disabled = !has;
+
+  renameEntries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "works-rename-item";
+    const names = document.createElement("div");
+    const original = document.createElement("span");
+    original.textContent = entry.originalName;
+    const renamed = document.createElement("strong");
+    renamed.textContent = renameFinalName(entry);
+    names.append(original, renamed);
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "mini-btn";
+    save.textContent = "저장";
+    save.addEventListener("click", () => downloadBlobAs(entry.file, renameFinalName(entry)));
+    row.append(names, save);
+    worksRenameList.append(row);
+  });
+  updateWorksSummary();
+  updateWorksBadge();
+}
+
+function clearRenameWorksEntries() {
+  renameEntries.forEach((entry) => {
+    if (entry.url) URL.revokeObjectURL(entry.url);
+  });
+  renameEntries = [];
+  renderRenameList();
+  setRenameStatus("파일 목록을 비웠어요");
+}
+
+function setRenameMode(mode) {
+  renameMode = mode;
+  document.querySelectorAll("#renameModeSeg .seg-btn").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.rmode === mode);
+  });
+  renameNumberFields.hidden = mode !== "number";
+  renameReplaceFields.hidden = mode !== "replace";
+  renameAffixFields.hidden = mode !== "affix";
+}
+
+function applyRenameAll() {
+  if (!renameEntries.length) return;
+  if (renameMode === "number") {
+    const baseRaw = (renameBase.value || "file").trim();
+    const start = Math.round(clampNumber(renameStart.value, 0, 1e9, 1));
+    const digits = Math.round(clampNumber(renameDigits.value, 1, 6, 3));
+    renameEntries.forEach((entry, index) => {
+      entry.newBase = `${baseRaw}_${String(start + index).padStart(digits, "0")}`;
+    });
+    setRenameStatus("번호 매기기를 적용했어요");
+  } else if (renameMode === "replace") {
+    const find = renameFind.value;
+    if (!find) {
+      setRenameStatus("찾을 내용을 입력해 주세요");
+      return;
+    }
+    const replacement = renameReplace.value;
+    renameEntries.forEach((entry) => {
+      entry.newBase = entry.newBase.split(find).join(replacement);
+    });
+    setRenameStatus("찾기·바꾸기를 적용했어요");
+  } else if (renameMode === "affix") {
+    const prefix = renamePrefix.value;
+    const suffix = renameSuffix.value;
+    renameEntries.forEach((entry) => {
+      entry.newBase = `${prefix}${entry.newBase}${suffix}`;
+    });
+    setRenameStatus("접두·접미를 적용했어요");
+  }
+  renderRenameList();
+}
+
+function resetRenameAll() {
+  renameEntries.forEach((entry) => {
+    entry.newBase = entry.base;
+  });
+  renderRenameList();
+  setRenameStatus("원래 이름으로 되돌렸어요");
+}
+
+function downloadBlobAs(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function downloadRenameZip() {
+  if (!renameEntries.length) return;
+  setRenameStatus("ZIP 생성 중…");
+  const used = new Map();
+  const files = [];
+  for (const entry of renameEntries) {
+    let name = renameFinalName(entry);
+    if (used.has(name)) {
+      const count = used.get(name) + 1;
+      used.set(name, count);
+      const parts = splitFileName(name);
+      name = `${parts.base}_${count}${parts.ext}`;
+    } else {
+      used.set(name, 1);
+    }
+    files.push({ name, bytes: new Uint8Array(await entry.file.arrayBuffer()) });
+  }
+  downloadBlobAs(makeZip(files), `renamed_${Date.now()}.zip`);
+  setRenameStatus(`${files.length}개 파일을 ZIP으로 저장했어요`);
+}
+
+renameInput.addEventListener("change", (event) => {
+  addRenameFiles(event.target.files);
+  renameInput.value = "";
+});
+
+["dragenter", "dragover"].forEach((eventName) => {
+  renameDropzone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    renameDropzone.classList.add("is-dragover");
+  });
+});
+
+["dragleave", "drop"].forEach((eventName) => {
+  renameDropzone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    renameDropzone.classList.remove("is-dragover");
+  });
+});
+
+renameDropzone.addEventListener("drop", (event) => {
+  if (event.dataTransfer && event.dataTransfer.files) addRenameFiles(event.dataTransfer.files);
+});
+
+document.querySelectorAll("#renameModeSeg .seg-btn").forEach((button) => {
+  button.addEventListener("click", () => setRenameMode(button.dataset.rmode));
+});
+
+renameApplyAll.addEventListener("click", applyRenameAll);
+renameReset.addEventListener("click", resetRenameAll);
+renameDownloadAll.addEventListener("click", downloadRenameZip);
+downloadBatchWorks.addEventListener("click", downloadBatchZip);
+clearBatchWorks.addEventListener("click", clearBatchResults);
+downloadRenameWorks.addEventListener("click", downloadRenameZip);
+clearRenameWorks.addEventListener("click", clearRenameWorksEntries);
+
 (function init() {
   let savedTheme = "light";
   try {
@@ -1508,7 +2410,11 @@ clearWorks.addEventListener("click", resetResults);
   }
   applyTheme(savedTheme === "dark" ? "dark" : "light");
   setExportMode("native");
+  setRenameMode("number");
   loadWorksFromDb();
+  renderBatchSources();
+  renderBatchResults();
+  syncBatchControls();
   syncControls();
   resizeCanvasToStage();
 })();
