@@ -47,6 +47,7 @@ const zoomLabel = document.getElementById("zoomLabel");
 const navItems = document.querySelectorAll(".nav-item");
 const views = {
   edit: document.getElementById("view-edit"),
+  batchcrop: document.getElementById("view-batchcrop"),
   batch: document.getElementById("view-batch"),
   rename: document.getElementById("view-rename"),
   works: document.getElementById("view-works"),
@@ -143,6 +144,14 @@ let panStartY = 0;
 let spaceHeld = false;
 let exportMode = "native";
 let ratioLocked = false;
+let guideMode = "none";
+
+// Undo / redo history of the editor state (crop + shape + image transform).
+let sourceImageId = 0;
+let imageIdCounter = 0;
+let history = [];
+let historyIndex = -1;
+let restoringHistory = false;
 
 const MIN_CROP_SIZE = 20;
 const HANDLE_HIT_RADIUS = 12;
@@ -344,6 +353,8 @@ function drawStage() {
   ctx.fillRect(displayOffsetX, displayOffsetY, displayWidth, displayHeight);
   ctx.drawImage(sourceImage, displayOffsetX, displayOffsetY, displayWidth, displayHeight);
 
+  drawGuides(displayOffsetX, displayOffsetY, displayWidth, displayHeight);
+
   if (activeShape === "freeform") {
     drawFreeformPreview();
     return;
@@ -409,6 +420,54 @@ function drawFreeformPreview() {
   ctx.setLineDash([8, 6]);
   ctx.fill();
   ctx.stroke();
+  ctx.restore();
+}
+
+function drawGuides(x, y, width, height) {
+  if (guideMode === "none" || width < 4 || height < 4) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, width, height);
+  ctx.clip();
+  ctx.lineWidth = 1;
+
+  const drawVerticals = (fractions) => fractions.forEach((f) => {
+    const lineX = Math.round(x + width * f) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(lineX, y);
+    ctx.lineTo(lineX, y + height);
+    ctx.stroke();
+  });
+  const drawHorizontals = (fractions) => fractions.forEach((f) => {
+    const lineY = Math.round(y + height * f) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x, lineY);
+    ctx.lineTo(x + width, lineY);
+    ctx.stroke();
+  });
+
+  if (guideMode === "center") {
+    ctx.strokeStyle = "rgba(226, 74, 153, 0.7)";
+    drawVerticals([0.5]);
+    drawHorizontals([0.5]);
+  } else if (guideMode === "thirds") {
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+    drawVerticals([1 / 3, 2 / 3]);
+    drawHorizontals([1 / 3, 2 / 3]);
+    ctx.strokeStyle = "rgba(31, 35, 48, 0.35)";
+    ctx.setLineDash([4, 4]);
+    drawVerticals([1 / 3, 2 / 3]);
+    drawHorizontals([1 / 3, 2 / 3]);
+    ctx.setLineDash([]);
+  } else if (guideMode === "grid") {
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.55)";
+    const cols = [1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6];
+    drawVerticals(cols);
+    drawHorizontals(cols);
+    ctx.strokeStyle = "rgba(31, 35, 48, 0.28)";
+    drawVerticals([0.5]);
+    drawHorizontals([0.5]);
+  }
   ctx.restore();
 }
 
@@ -606,18 +665,21 @@ function loadFile(file) {
   const image = new Image();
   image.onload = () => {
     sourceImage = image;
+    sourceImageId = nextImageId();
     fileName.textContent = file.name;
     imageMeta.textContent = `${image.naturalWidth} x ${image.naturalHeight}px`;
     stageEmpty.classList.add("is-hidden");
     if (stageHint) stageHint.classList.remove("is-hidden");
     stampBtn.disabled = false;
     clearBtn.disabled = false;
+    setTransformButtonsEnabled(true);
     freeformPoints = [];
     cropActive = false;
     isDrawingShape = false;
     pendingDraw = false;
     resizeCanvasToStage();
     syncControls();
+    resetHistory();
     setStatus("도형을 골라 이미지 위에서 드래그해 그리세요");
   };
   image.onerror = () => setStatus("이미지를 읽지 못했어요");
@@ -634,9 +696,11 @@ function resetResults() {
   setStatus("모든 파일을 비웠어요");
 }
 
-async function canvasToBlob(canvas, mimeType) {
+async function canvasToBlob(canvas, mimeType, quality) {
+  const fallback = mimeType === "image/jpeg" ? 0.94 : 0.98;
+  const q = typeof quality === "number" ? quality : fallback;
   return new Promise((resolve) => {
-    canvas.toBlob((blob) => resolve(blob), mimeType, mimeType === "image/jpeg" ? 0.94 : 0.98);
+    canvas.toBlob((blob) => resolve(blob), mimeType, q);
   });
 }
 
@@ -1020,6 +1084,7 @@ document.querySelectorAll(".size-preset").forEach((button) => {
     cropWidthInput.value = width;
     cropHeightInput.value = height;
     setCropSize(width, height);
+    commitHistory();
     closeShapePopup();
     if (sourceImage) setStatus(`${width} x ${height} 영역을 가운데에 배치했습니다`);
   });
@@ -1043,6 +1108,7 @@ function selectShape(shape) {
   }
   syncControls();
   drawStage();
+  commitHistory();
 }
 
 function openShapePopup() {
@@ -1092,6 +1158,7 @@ function onSizeInput(which) {
     else height = Math.round(width / ratio);
   }
   setCropSize(width, height);
+  commitHistory();
 }
 
 cropWidthInput.addEventListener("change", () => onSizeInput("width"));
@@ -1108,6 +1175,8 @@ function nudgeCrop(dx, dy) {
   if (!sourceImage) return;
   if (activeShape === "freeform" && freeformPoints.length) moveFreeformBy(dx, dy);
   else if (cropActive) moveCropTo(crop.x + dx, crop.y + dy);
+  else return;
+  commitHistory();
 }
 
 stageCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
@@ -1232,6 +1301,7 @@ stageCanvas.addEventListener("pointerup", (event) => {
     activeHandle = null;
     stageCanvas.releasePointerCapture(event.pointerId);
     syncControls();
+    commitHistory();
     setStatus(`커터 크기 ${Math.round(crop.width)} x ${Math.round(crop.height)}`);
     updateHoverCursor(event.clientX, event.clientY);
     return;
@@ -1243,6 +1313,7 @@ stageCanvas.addEventListener("pointerup", (event) => {
     if (freeformPoints.length > 2) {
       syncCropFromFreeform();
       cropActive = true;
+      commitHistory();
       setStatus("자유형 영역이 준비됐습니다");
     } else {
       freeformPoints = [];
@@ -1262,6 +1333,7 @@ stageCanvas.addEventListener("pointerup", (event) => {
       drawStage();
     } else {
       syncControls();
+      commitHistory();
       setStatus(`${shapeLabels[activeShape]} ${Math.round(crop.width)} x ${Math.round(crop.height)} 영역 완성`);
       drawStage();
       updateHoverCursor(event.clientX, event.clientY);
@@ -1273,6 +1345,7 @@ stageCanvas.addEventListener("pointerup", (event) => {
     isDragging = false;
     stageCanvas.releasePointerCapture(event.pointerId);
     if (!pointerMoved && stampOnClick.checked) stampCrop();
+    else if (pointerMoved) commitHistory();
     return;
   }
 
@@ -1351,17 +1424,21 @@ document.addEventListener("keydown", (event) => {
 /* ============================================================
    Works badge + export resolution
    ============================================================ */
+function worksTotalCount() {
+  return generatedCrops.length + batchCropResults.length + batchResults.length + renameEntries.length;
+}
+
 function updateWorksBadge() {
   if (!navWorksCount) return;
-  const count = generatedCrops.length + batchResults.length + renameEntries.length;
+  const count = worksTotalCount();
   navWorksCount.textContent = String(count);
   navWorksCount.hidden = count === 0;
 }
 
 function updateWorksSummary() {
   if (!worksHint) return;
-  const count = generatedCrops.length + batchResults.length + renameEntries.length;
-  worksHint.textContent = count ? `세 가지 도구에서 만든 작업 ${count}개` : "지금까지 만든 파일이 여기에 모여요";
+  const count = worksTotalCount();
+  worksHint.textContent = count ? `여러 도구에서 만든 작업 ${count}개` : "지금까지 만든 파일이 여기에 모여요";
 }
 
 function getExportSize(width, height) {
@@ -1435,6 +1512,195 @@ document.querySelectorAll(".seg-btn[data-export]").forEach((button) => {
 
 [exportScaleInput, exportWidthInput, exportHeightInput].forEach((input) => {
   input.addEventListener("input", updateExportInfo);
+});
+
+/* ============================================================
+   Guides, image transforms (rotate / flip), undo / redo
+   ============================================================ */
+const undoBtn = document.getElementById("undoBtn");
+const redoBtn = document.getElementById("redoBtn");
+const rotateLeftBtn = document.getElementById("rotateLeftBtn");
+const rotateRightBtn = document.getElementById("rotateRightBtn");
+const flipHBtn = document.getElementById("flipHBtn");
+const flipVBtn = document.getElementById("flipVBtn");
+const transformButtons = [rotateLeftBtn, rotateRightBtn, flipHBtn, flipVBtn];
+
+function setGuideMode(mode) {
+  guideMode = mode;
+  document.querySelectorAll("#guideSeg .seg-btn").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.guide === mode);
+  });
+  drawStage();
+}
+
+document.querySelectorAll("#guideSeg .seg-btn").forEach((button) => {
+  button.addEventListener("click", () => setGuideMode(button.dataset.guide));
+});
+
+function nextImageId() {
+  imageIdCounter += 1;
+  return imageIdCounter;
+}
+
+function setTransformButtonsEnabled(enabled) {
+  transformButtons.forEach((button) => button && (button.disabled = !enabled));
+}
+
+function serializeState() {
+  return JSON.stringify({
+    img: sourceImageId,
+    shape: activeShape,
+    active: cropActive,
+    crop: { x: Math.round(crop.x), y: Math.round(crop.y), w: Math.round(crop.width), h: Math.round(crop.height) },
+    free: freeformPoints.map((point) => [Math.round(point.x), Math.round(point.y)]),
+  });
+}
+
+function makeSnapshot() {
+  return {
+    image: sourceImage,
+    imageId: sourceImageId,
+    fileLabel: fileName.textContent,
+    metaLabel: imageMeta.textContent,
+    shape: activeShape,
+    cropActive,
+    crop: { ...crop },
+    freeform: freeformPoints.map((point) => ({ ...point })),
+    key: serializeState(),
+  };
+}
+
+function updateHistoryButtons() {
+  if (undoBtn) undoBtn.disabled = historyIndex <= 0;
+  if (redoBtn) redoBtn.disabled = historyIndex >= history.length - 1;
+}
+
+function commitHistory() {
+  if (restoringHistory || !sourceImage) return;
+  const snap = makeSnapshot();
+  if (historyIndex >= 0 && history[historyIndex].key === snap.key) return;
+  history = history.slice(0, historyIndex + 1);
+  history.push(snap);
+  if (history.length > 40) history.shift();
+  historyIndex = history.length - 1;
+  updateHistoryButtons();
+}
+
+function resetHistory() {
+  history = [];
+  historyIndex = -1;
+  commitHistory();
+}
+
+function applySnapshot(snap) {
+  restoringHistory = true;
+  const imageChanged = snap.imageId !== sourceImageId;
+  sourceImage = snap.image;
+  sourceImageId = snap.imageId;
+  fileName.textContent = snap.fileLabel;
+  imageMeta.textContent = snap.metaLabel;
+  activeShape = snap.shape;
+  cropActive = snap.cropActive;
+  crop.x = snap.crop.x;
+  crop.y = snap.crop.y;
+  crop.width = snap.crop.width;
+  crop.height = snap.crop.height;
+  freeformPoints = snap.freeform.map((point) => ({ ...point }));
+  cropWidthInput.value = Math.round(crop.width);
+  cropHeightInput.value = Math.round(crop.height);
+  if (imageChanged) fitImageToStage();
+  syncControls();
+  updateZoomLabel();
+  drawStage();
+  restoringHistory = false;
+}
+
+function undo() {
+  if (historyIndex <= 0) return;
+  historyIndex -= 1;
+  applySnapshot(history[historyIndex]);
+  updateHistoryButtons();
+  setStatus("실행 취소");
+}
+
+function redo() {
+  if (historyIndex >= history.length - 1) return;
+  historyIndex += 1;
+  applySnapshot(history[historyIndex]);
+  updateHistoryButtons();
+  setStatus("다시 실행");
+}
+
+const TRANSFORM_LABELS = {
+  left: "왼쪽으로 90° 회전했어요",
+  right: "오른쪽으로 90° 회전했어요",
+  flipH: "좌우로 반전했어요",
+  flipV: "상하로 반전했어요",
+};
+
+function transformSource(kind) {
+  if (!sourceImage) return;
+  const w = sourceImage.naturalWidth;
+  const h = sourceImage.naturalHeight;
+  const canvas = document.createElement("canvas");
+  const c = canvas.getContext("2d");
+  const rotate = kind === "left" || kind === "right";
+  canvas.width = rotate ? h : w;
+  canvas.height = rotate ? w : h;
+  c.save();
+  if (kind === "right") {
+    c.translate(h, 0);
+    c.rotate(Math.PI / 2);
+  } else if (kind === "left") {
+    c.translate(0, w);
+    c.rotate(-Math.PI / 2);
+  } else if (kind === "flipH") {
+    c.translate(w, 0);
+    c.scale(-1, 1);
+  } else if (kind === "flipV") {
+    c.translate(0, h);
+    c.scale(1, -1);
+  }
+  c.drawImage(sourceImage, 0, 0);
+  c.restore();
+
+  const newImage = new Image();
+  newImage.onload = () => {
+    sourceImage = newImage;
+    sourceImageId = nextImageId();
+    imageMeta.textContent = `${newImage.naturalWidth} x ${newImage.naturalHeight}px`;
+    cropActive = false;
+    isDrawingShape = false;
+    pendingDraw = false;
+    freeformPoints = [];
+    fitImageToStage();
+    syncControls();
+    updateZoomLabel();
+    drawStage();
+    commitHistory();
+    setStatus(TRANSFORM_LABELS[kind] || "이미지를 변형했어요");
+  };
+  newImage.src = canvas.toDataURL("image/png");
+}
+
+if (undoBtn) undoBtn.addEventListener("click", undo);
+if (redoBtn) redoBtn.addEventListener("click", redo);
+if (rotateLeftBtn) rotateLeftBtn.addEventListener("click", () => transformSource("left"));
+if (rotateRightBtn) rotateRightBtn.addEventListener("click", () => transformSource("right"));
+if (flipHBtn) flipHBtn.addEventListener("click", () => transformSource("flipH"));
+if (flipVBtn) flipVBtn.addEventListener("click", () => transformSource("flipV"));
+
+document.addEventListener("keydown", (event) => {
+  if (isTypingTarget(event.target)) return;
+  if (!(event.ctrlKey || event.metaKey)) return;
+  const key = event.key.toLowerCase();
+  if (key === "z" && !event.shiftKey) {
+    undo();
+    event.preventDefault();
+  } else if ((key === "z" && event.shiftKey) || key === "y") {
+    redo();
+    event.preventDefault();
+  }
 });
 
 /* ============================================================
@@ -1985,6 +2251,583 @@ batchDownloadAll.addEventListener("click", downloadBatchZip);
 batchClearResults.addEventListener("click", clearBatchResults);
 
 /* ============================================================
+   Batch crop — apply one crop region to many images
+   ============================================================ */
+const batchCropStatus = document.getElementById("batchCropStatus");
+const batchCropSourceInput = document.getElementById("batchCropSourceInput");
+const batchCropSourceDropzone = document.getElementById("batchCropSourceDropzone");
+const batchCropSourceGrid = document.getElementById("batchCropSourceGrid");
+const batchCropSourceCount = document.getElementById("batchCropSourceCount");
+const batchCropRatioSeg = document.getElementById("batchCropRatioSeg");
+const batchCropFromCenter = document.getElementById("batchCropFromCenter");
+const batchCropPreviewCanvas = document.getElementById("batchCropPreviewCanvas");
+const batchCropPreviewEmpty = document.getElementById("batchCropPreviewEmpty");
+const batchCropPreviewName = document.getElementById("batchCropPreviewName");
+const batchCropRunBtn = document.getElementById("batchCropRunBtn");
+const batchCropCancelBtn = document.getElementById("batchCropCancelBtn");
+const batchCropProgress = document.getElementById("batchCropProgress");
+const batchCropProgressText = document.getElementById("batchCropProgressText");
+const batchCropProgressBar = document.getElementById("batchCropProgressBar");
+const batchCropResultCount = document.getElementById("batchCropResultCount");
+const batchCropResultHint = document.getElementById("batchCropResultHint");
+const batchCropResultEmpty = document.getElementById("batchCropResultEmpty");
+const batchCropResultGrid = document.getElementById("batchCropResultGrid");
+const batchCropDownloadAll = document.getElementById("batchCropDownloadAll");
+const batchCropClearResults = document.getElementById("batchCropClearResults");
+const batchCropPrefix = document.getElementById("batchCropPrefix");
+const batchCropFormat = document.getElementById("batchCropFormat");
+const batchCropAutoDownload = document.getElementById("batchCropAutoDownload");
+const worksBatchCropGrid = document.getElementById("worksBatchCropGrid");
+const worksBatchCropEmpty = document.getElementById("worksBatchCropEmpty");
+const worksBatchCropCount = document.getElementById("worksBatchCropCount");
+const downloadBatchCropWorks = document.getElementById("downloadBatchCropWorks");
+const clearBatchCropWorks = document.getElementById("clearBatchCropWorks");
+
+let batchCropSources = [];
+let batchCropSelected = 0;
+let batchCropRect = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
+let batchCropResults = [];
+let batchCropRunning = false;
+let batchCropCancelRequested = false;
+let batchCropFrame = null;
+let batchCropInteraction = null;
+let batchCropDrawing = null;
+
+function setBatchCropStatus(message) {
+  if (batchCropStatus) batchCropStatus.textContent = message;
+}
+
+function batchCropAspect() {
+  const active = batchCropRatioSeg.querySelector(".seg-btn.is-active");
+  const value = active ? active.dataset.ratio : "free";
+  if (value === "free") return null;
+  const [a, b] = value.split(":").map(Number);
+  return a > 0 && b > 0 ? a / b : null;
+}
+
+function currentBatchCropSource() {
+  return batchCropSources[batchCropSelected] || null;
+}
+
+function constrainBatchCropRect() {
+  const source = currentBatchCropSource();
+  const rect = batchCropRect;
+  const baseW = source ? source.image.naturalWidth : 1;
+  const baseH = source ? source.image.naturalHeight : 1;
+  rect.width = Math.min(1, Math.max(0.02, rect.width));
+  rect.height = Math.min(1, Math.max(0.02, rect.height));
+
+  const aspect = batchCropAspect();
+  if (aspect) {
+    rect.height = (rect.width * baseW) / (baseH * aspect);
+    if (rect.height > 1) {
+      rect.height = 1;
+      rect.width = (rect.height * baseH * aspect) / baseW;
+    }
+  }
+  if (batchCropFromCenter && batchCropFromCenter.checked) {
+    rect.x = (1 - rect.width) / 2;
+    rect.y = (1 - rect.height) / 2;
+  }
+  rect.x = Math.min(Math.max(0, rect.x), 1 - rect.width);
+  rect.y = Math.min(Math.max(0, rect.y), 1 - rect.height);
+}
+
+function resetBatchCropRect() {
+  batchCropRect = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
+  constrainBatchCropRect();
+}
+
+async function addBatchCropSources(files) {
+  if (batchCropRunning) return;
+  const available = Math.max(0, 50 - batchCropSources.length);
+  const selected = Array.from(files || []).filter((file) => file.type.startsWith("image/")).slice(0, available);
+  if (!selected.length) {
+    setBatchCropStatus(available ? "사용할 수 있는 이미지 파일이 없어요" : "원본 이미지는 최대 50개까지 추가할 수 있어요");
+    return;
+  }
+  const wasEmpty = batchCropSources.length === 0;
+  setBatchCropStatus(`${selected.length}개 이미지를 불러오는 중`);
+  const loaded = await Promise.allSettled(selected.map(loadBatchImage));
+  loaded.forEach((result) => {
+    if (result.status === "fulfilled") batchCropSources.push(result.value);
+  });
+  if (batchCropSelected >= batchCropSources.length) batchCropSelected = Math.max(0, batchCropSources.length - 1);
+  if (wasEmpty) resetBatchCropRect();
+  renderBatchCropSources();
+  drawBatchCropPreview();
+  syncBatchCropControls();
+  setBatchCropStatus(`${batchCropSources.length}개 원본 이미지 준비됨`);
+}
+
+function renderBatchCropSources() {
+  batchCropSourceGrid.innerHTML = "";
+  batchCropSources.forEach((source, index) => {
+    const card = document.createElement("article");
+    card.className = `batch-file-card${index === batchCropSelected ? " is-active" : ""}`;
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.setAttribute("aria-label", `${source.file.name} 미리보기`);
+
+    const image = document.createElement("img");
+    image.src = source.url;
+    image.alt = "";
+    const name = document.createElement("span");
+    name.textContent = source.file.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "batch-file-remove";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `${source.file.name} 제거`);
+
+    const select = () => {
+      batchCropSelected = index;
+      constrainBatchCropRect();
+      renderBatchCropSources();
+      drawBatchCropPreview();
+    };
+    card.addEventListener("click", select);
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        select();
+      }
+    });
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (batchCropRunning) return;
+      URL.revokeObjectURL(source.url);
+      batchCropSources.splice(index, 1);
+      batchCropSelected = Math.min(batchCropSelected, Math.max(0, batchCropSources.length - 1));
+      renderBatchCropSources();
+      drawBatchCropPreview();
+      syncBatchCropControls();
+      setBatchCropStatus(batchCropSources.length ? `${batchCropSources.length}개 원본 이미지 준비됨` : "원본 이미지를 업로드하세요");
+    });
+
+    card.append(image, name, remove);
+    batchCropSourceGrid.append(card);
+  });
+  batchCropSourceCount.textContent = `${batchCropSources.length}개`;
+}
+
+function drawBatchCropPreview() {
+  const context = batchCropPreviewCanvas.getContext("2d");
+  const canvasWidth = batchCropPreviewCanvas.width;
+  const canvasHeight = batchCropPreviewCanvas.height;
+  context.clearRect(0, 0, canvasWidth, canvasHeight);
+  batchCropFrame = null;
+  const source = currentBatchCropSource();
+  batchCropPreviewName.textContent = source ? source.file.name : "선택된 원본 없음";
+  batchCropPreviewEmpty.classList.toggle("is-hidden", Boolean(source));
+  if (!source) return;
+
+  const baseWidth = source.image.naturalWidth;
+  const baseHeight = source.image.naturalHeight;
+  const scale = Math.min(canvasWidth / baseWidth, canvasHeight / baseHeight);
+  const drawWidth = baseWidth * scale;
+  const drawHeight = baseHeight * scale;
+  const originX = (canvasWidth - drawWidth) / 2;
+  const originY = (canvasHeight - drawHeight) / 2;
+  context.fillStyle = "#ffffff";
+  context.fillRect(originX, originY, drawWidth, drawHeight);
+  context.drawImage(source.image, originX, originY, drawWidth, drawHeight);
+
+  constrainBatchCropRect();
+  const box = {
+    x: originX + batchCropRect.x * drawWidth,
+    y: originY + batchCropRect.y * drawHeight,
+    width: batchCropRect.width * drawWidth,
+    height: batchCropRect.height * drawHeight,
+  };
+
+  // Dim the area outside the crop box.
+  context.save();
+  context.fillStyle = "rgba(20, 22, 34, 0.45)";
+  context.beginPath();
+  context.rect(originX, originY, drawWidth, drawHeight);
+  context.rect(box.x, box.y, box.width, box.height);
+  context.fill("evenodd");
+  context.restore();
+
+  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#e24a99";
+  context.save();
+  context.strokeStyle = accent;
+  context.lineWidth = 2;
+  context.setLineDash([7, 4]);
+  context.strokeRect(box.x, box.y, box.width, box.height);
+  context.setLineDash([]);
+  // Rule-of-thirds inside the crop box.
+  context.strokeStyle = "rgba(255, 255, 255, 0.6)";
+  context.lineWidth = 1;
+  [1 / 3, 2 / 3].forEach((f) => {
+    context.beginPath();
+    context.moveTo(box.x + box.width * f, box.y);
+    context.lineTo(box.x + box.width * f, box.y + box.height);
+    context.stroke();
+    context.beginPath();
+    context.moveTo(box.x, box.y + box.height * f);
+    context.lineTo(box.x + box.width, box.y + box.height * f);
+    context.stroke();
+  });
+  const handleSize = 10;
+  [
+    [box.x, box.y],
+    [box.x + box.width, box.y],
+    [box.x, box.y + box.height],
+    [box.x + box.width, box.y + box.height],
+  ].forEach(([x, y]) => {
+    context.fillStyle = "#ffffff";
+    context.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+    context.strokeStyle = accent;
+    context.lineWidth = 2;
+    context.strokeRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+  });
+  context.restore();
+
+  const pxW = Math.round(batchCropRect.width * baseWidth);
+  const pxH = Math.round(batchCropRect.height * baseHeight);
+  context.save();
+  context.fillStyle = "rgba(20, 22, 34, 0.78)";
+  context.font = "600 12px Segoe UI, sans-serif";
+  const label = `${pxW} × ${pxH}px`;
+  const textWidth = context.measureText(label).width + 12;
+  context.fillRect(box.x, Math.max(originY, box.y - 22), textWidth, 18);
+  context.fillStyle = "#fff";
+  context.fillText(label, box.x + 6, Math.max(originY + 13, box.y - 9));
+  context.restore();
+
+  batchCropFrame = { originX, originY, drawWidth, drawHeight, scale, baseWidth, baseHeight, box };
+}
+
+function getBatchCropPoint(event) {
+  const rect = batchCropPreviewCanvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * (batchCropPreviewCanvas.width / rect.width),
+    y: (event.clientY - rect.top) * (batchCropPreviewCanvas.height / rect.height),
+  };
+}
+
+function batchCropNormalized(point) {
+  return {
+    x: (point.x - batchCropFrame.originX) / batchCropFrame.drawWidth,
+    y: (point.y - batchCropFrame.originY) / batchCropFrame.drawHeight,
+  };
+}
+
+function getBatchCropHandle(point) {
+  if (!batchCropFrame) return null;
+  const box = batchCropFrame.box;
+  const hitRadius = 12;
+  const handles = [
+    { name: "nw", x: box.x, y: box.y, cursor: "nwse-resize" },
+    { name: "ne", x: box.x + box.width, y: box.y, cursor: "nesw-resize" },
+    { name: "sw", x: box.x, y: box.y + box.height, cursor: "nesw-resize" },
+    { name: "se", x: box.x + box.width, y: box.y + box.height, cursor: "nwse-resize" },
+  ];
+  return handles.find((handle) => Math.hypot(point.x - handle.x, point.y - handle.y) <= hitRadius) || null;
+}
+
+function pointInsideBatchCrop(point) {
+  if (!batchCropFrame) return false;
+  const box = batchCropFrame.box;
+  return point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
+}
+
+function pointInsideBatchCropImage(point) {
+  if (!batchCropFrame) return false;
+  return (
+    point.x >= batchCropFrame.originX &&
+    point.x <= batchCropFrame.originX + batchCropFrame.drawWidth &&
+    point.y >= batchCropFrame.originY &&
+    point.y <= batchCropFrame.originY + batchCropFrame.drawHeight
+  );
+}
+
+function updateBatchCropCursor(point) {
+  const handle = getBatchCropHandle(point);
+  batchCropPreviewCanvas.style.cursor = handle
+    ? handle.cursor
+    : pointInsideBatchCrop(point) ? "grab" : pointInsideBatchCropImage(point) ? "crosshair" : "default";
+}
+
+batchCropPreviewCanvas.addEventListener("pointerdown", (event) => {
+  if (batchCropRunning || !batchCropFrame || event.button !== 0) return;
+  const point = getBatchCropPoint(event);
+  const handle = getBatchCropHandle(point);
+  if (handle) {
+    batchCropInteraction = { type: "resize", handle: handle.name, start: batchCropNormalized(point), original: { ...batchCropRect } };
+  } else if (pointInsideBatchCrop(point)) {
+    batchCropInteraction = { type: "move", start: batchCropNormalized(point), original: { ...batchCropRect } };
+  } else if (pointInsideBatchCropImage(point)) {
+    const norm = batchCropNormalized(point);
+    batchCropDrawing = { x: norm.x, y: norm.y };
+  } else {
+    return;
+  }
+  batchCropPreviewCanvas.setPointerCapture(event.pointerId);
+});
+
+batchCropPreviewCanvas.addEventListener("pointermove", (event) => {
+  if (!batchCropFrame) return;
+  const point = getBatchCropPoint(event);
+  if (batchCropDrawing) {
+    const norm = batchCropNormalized(point);
+    batchCropRect = {
+      x: Math.min(batchCropDrawing.x, norm.x),
+      y: Math.min(batchCropDrawing.y, norm.y),
+      width: Math.max(0.02, Math.abs(norm.x - batchCropDrawing.x)),
+      height: Math.max(0.02, Math.abs(norm.y - batchCropDrawing.y)),
+    };
+    constrainBatchCropRect();
+    drawBatchCropPreview();
+    return;
+  }
+  if (!batchCropInteraction) {
+    updateBatchCropCursor(point);
+    return;
+  }
+  const current = batchCropNormalized(point);
+  const interaction = batchCropInteraction;
+  const dx = current.x - interaction.start.x;
+  const dy = current.y - interaction.start.y;
+  const original = interaction.original;
+  if (interaction.type === "move") {
+    batchCropRect = { ...original, x: original.x + dx, y: original.y + dy };
+  } else {
+    let left = original.x;
+    let top = original.y;
+    let right = original.x + original.width;
+    let bottom = original.y + original.height;
+    if (interaction.handle.includes("w")) left = Math.min(original.x + dx, right - 0.02);
+    if (interaction.handle.includes("e")) right = Math.max(original.x + original.width + dx, left + 0.02);
+    if (interaction.handle.includes("n")) top = Math.min(original.y + dy, bottom - 0.02);
+    if (interaction.handle.includes("s")) bottom = Math.max(original.y + original.height + dy, top + 0.02);
+    batchCropRect = { x: left, y: top, width: right - left, height: bottom - top };
+  }
+  constrainBatchCropRect();
+  drawBatchCropPreview();
+});
+
+function endBatchCropInteraction(event) {
+  if (!batchCropInteraction && !batchCropDrawing) return;
+  batchCropInteraction = null;
+  batchCropDrawing = null;
+  try {
+    batchCropPreviewCanvas.releasePointerCapture(event.pointerId);
+  } catch (error) {
+    /* already released */
+  }
+  if (batchCropFrame) updateBatchCropCursor(getBatchCropPoint(event));
+}
+
+batchCropPreviewCanvas.addEventListener("pointerup", endBatchCropInteraction);
+batchCropPreviewCanvas.addEventListener("pointercancel", endBatchCropInteraction);
+
+function syncBatchCropControls() {
+  const ready = batchCropSources.length > 0;
+  batchCropRunBtn.disabled = !ready || batchCropRunning;
+  batchCropCancelBtn.disabled = !batchCropRunning || batchCropCancelRequested;
+  batchCropRunBtn.textContent = batchCropRunning
+    ? "처리 중..."
+    : ready ? `${batchCropSources.length}개 일괄 자르기` : "일괄 자르기";
+  [batchCropSourceInput, batchCropPrefix, batchCropFormat].forEach((control) => {
+    if (control) control.disabled = batchCropRunning;
+  });
+}
+
+function buildBatchCropResultCard(item) {
+  const card = document.createElement("article");
+  card.className = "tile-card";
+  const image = document.createElement("img");
+  image.src = item.url;
+  image.alt = item.file;
+  const footer = document.createElement("div");
+  footer.className = "tile-footer";
+  const name = document.createElement("strong");
+  name.className = "tile-name";
+  name.textContent = item.file;
+  const dim = document.createElement("span");
+  dim.className = "tile-dim";
+  dim.textContent = `${item.width} × ${item.height}px`;
+  const actions = document.createElement("div");
+  actions.className = "tile-actions";
+  const link = document.createElement("a");
+  link.href = item.url;
+  link.download = item.file;
+  link.textContent = "저장";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "tile-remove";
+  remove.textContent = "삭제";
+  remove.addEventListener("click", () => {
+    if (!batchCropRunning) removeBatchCropResult(item.id);
+  });
+  actions.append(link, remove);
+  footer.append(name, dim, actions);
+  card.append(image, footer);
+  return card;
+}
+
+function renderBatchCropResults() {
+  [batchCropResultGrid, worksBatchCropGrid].forEach((grid) => {
+    if (!grid) return;
+    grid.innerHTML = "";
+    batchCropResults.slice().reverse().forEach((item) => grid.append(buildBatchCropResultCard(item)));
+  });
+  const hasResults = batchCropResults.length > 0;
+  batchCropResultEmpty.classList.toggle("is-hidden", hasResults);
+  if (worksBatchCropEmpty) worksBatchCropEmpty.classList.toggle("is-hidden", hasResults);
+  batchCropDownloadAll.disabled = !hasResults || batchCropRunning;
+  if (downloadBatchCropWorks) downloadBatchCropWorks.disabled = !hasResults || batchCropRunning;
+  batchCropClearResults.disabled = !hasResults || batchCropRunning;
+  if (clearBatchCropWorks) clearBatchCropWorks.disabled = !hasResults || batchCropRunning;
+  batchCropResultCount.textContent = `${batchCropResults.length}개`;
+  if (worksBatchCropCount) worksBatchCropCount.textContent = `${batchCropResults.length}개`;
+  batchCropResultHint.textContent = hasResults ? `완성된 파일 ${batchCropResults.length}개` : "자르기 완료 후 파일이 여기에 표시됩니다";
+  updateWorksSummary();
+  updateWorksBadge();
+}
+
+function removeBatchCropResult(id) {
+  const index = batchCropResults.findIndex((item) => item.id === id);
+  if (index === -1) return;
+  const [item] = batchCropResults.splice(index, 1);
+  URL.revokeObjectURL(item.url);
+  renderBatchCropResults();
+}
+
+function clearBatchCropResultsAll() {
+  if (batchCropRunning || !batchCropResults.length) return;
+  batchCropResults.forEach((item) => URL.revokeObjectURL(item.url));
+  batchCropResults = [];
+  renderBatchCropResults();
+  setBatchCropStatus("결과를 비웠어요");
+}
+
+async function runBatchCrop() {
+  if (batchCropRunning || !batchCropSources.length) return;
+  batchCropRunning = true;
+  batchCropCancelRequested = false;
+  batchCropProgress.hidden = false;
+  batchCropProgressBar.max = batchCropSources.length;
+  batchCropProgressBar.value = 0;
+  batchCropProgressText.textContent = `0 / ${batchCropSources.length}`;
+  syncBatchCropControls();
+  renderBatchCropResults();
+
+  const mimeType = batchCropFormat.value;
+  const extension = mimeType.split("/")[1].replace("jpeg", "jpg");
+  const safePrefix = (batchCropPrefix.value || "crop").trim().replace(/[\\/:*?"<>|]+/g, "-") || "crop";
+  let completed = 0;
+  let failed = false;
+
+  try {
+    for (const source of batchCropSources) {
+      if (batchCropCancelRequested) break;
+      setBatchCropStatus(`${source.file.name} 처리 중`);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+
+      const baseW = source.image.naturalWidth;
+      const baseH = source.image.naturalHeight;
+      let cw = Math.max(1, Math.round(batchCropRect.width * baseW));
+      let ch = Math.max(1, Math.round(batchCropRect.height * baseH));
+      let cx = Math.round(batchCropRect.x * baseW);
+      let cy = Math.round(batchCropRect.y * baseH);
+      cw = Math.min(cw, baseW);
+      ch = Math.min(ch, baseH);
+      cx = Math.min(Math.max(0, cx), baseW - cw);
+      cy = Math.min(Math.max(0, cy), baseH - ch);
+
+      const output = document.createElement("canvas");
+      output.width = cw;
+      output.height = ch;
+      const context = output.getContext("2d");
+      if (mimeType === "image/jpeg") {
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, cw, ch);
+      }
+      context.drawImage(source.image, cx, cy, cw, ch, 0, 0, cw, ch);
+
+      const blob = await canvasToBlob(output, mimeType);
+      const originalName = source.file.name.replace(/\.[^.]+$/, "");
+      const serial = String(batchCropResults.length + 1).padStart(3, "0");
+      const item = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        blob,
+        url: URL.createObjectURL(blob),
+        file: `${safePrefix}_${serial}_${originalName}.${extension}`,
+        width: cw,
+        height: ch,
+        date: Date.now(),
+      };
+      batchCropResults.push(item);
+      completed += 1;
+      batchCropProgressBar.value = completed;
+      batchCropProgressText.textContent = `${completed} / ${batchCropSources.length}`;
+      renderBatchCropResults();
+      if (batchCropAutoDownload.checked) downloadOne(item);
+    }
+  } catch (error) {
+    failed = true;
+  } finally {
+    const cancelled = batchCropCancelRequested;
+    batchCropRunning = false;
+    batchCropCancelRequested = false;
+    syncBatchCropControls();
+    renderBatchCropResults();
+    setBatchCropStatus(
+      failed
+        ? `처리 중 오류 발생 · ${completed}개 완료`
+        : cancelled ? `실행 취소됨 · ${completed}개 완료` : `일괄 자르기 완료 · ${completed}개`
+    );
+  }
+}
+
+function cancelBatchCrop() {
+  if (!batchCropRunning) return;
+  batchCropCancelRequested = true;
+  batchCropCancelBtn.disabled = true;
+  setBatchCropStatus("현재 파일 처리 후 실행을 취소합니다");
+}
+
+async function downloadBatchCropZip() {
+  if (!batchCropResults.length) return;
+  setBatchCropStatus("ZIP 파일 생성 중");
+  const files = [];
+  for (const item of batchCropResults) {
+    files.push({ name: item.file, bytes: new Uint8Array(await item.blob.arrayBuffer()) });
+  }
+  downloadBlobAs(makeZip(files), `batch-crop_${Date.now()}.zip`);
+  setBatchCropStatus("ZIP 저장 완료");
+}
+
+batchCropSourceInput.addEventListener("change", (event) => {
+  addBatchCropSources(event.target.files);
+  event.target.value = "";
+});
+wireBatchDropzone(batchCropSourceDropzone, addBatchCropSources);
+batchCropRatioSeg.querySelectorAll(".seg-btn").forEach((button) => {
+  button.addEventListener("click", () => {
+    batchCropRatioSeg.querySelectorAll(".seg-btn").forEach((btn) => btn.classList.toggle("is-active", btn === button));
+    constrainBatchCropRect();
+    drawBatchCropPreview();
+  });
+});
+if (batchCropFromCenter) {
+  batchCropFromCenter.addEventListener("change", () => {
+    constrainBatchCropRect();
+    drawBatchCropPreview();
+  });
+}
+batchCropRunBtn.addEventListener("click", runBatchCrop);
+batchCropCancelBtn.addEventListener("click", cancelBatchCrop);
+batchCropDownloadAll.addEventListener("click", downloadBatchCropZip);
+batchCropClearResults.addEventListener("click", clearBatchCropResultsAll);
+if (downloadBatchCropWorks) downloadBatchCropWorks.addEventListener("click", downloadBatchCropZip);
+if (clearBatchCropWorks) clearBatchCropWorks.addEventListener("click", clearBatchCropResultsAll);
+
+/* ============================================================
    IndexedDB — persistent "내 작업" store
    ============================================================ */
 const WORKS_DB = "cookielab-works";
@@ -2065,6 +2908,7 @@ function setView(name, navButton) {
   if (navButton) navButton.classList.add("is-active");
   if (name === "edit") requestAnimationFrame(resizeCanvasToStage);
   if (name === "batch") requestAnimationFrame(drawBatchPreview);
+  if (name === "batchcrop") requestAnimationFrame(drawBatchCropPreview);
 }
 
 navItems.forEach((button) => {
@@ -2401,6 +3245,290 @@ clearBatchWorks.addEventListener("click", clearBatchResults);
 downloadRenameWorks.addEventListener("click", downloadRenameZip);
 clearRenameWorks.addEventListener("click", clearRenameWorksEntries);
 
+/* ============================================================
+   파일 일괄 편집하기 — 모드 전환 + 용량 줄이기(압축)
+   ============================================================ */
+const editFilesModeSeg = document.getElementById("editFilesModeSeg");
+const editFilesRenamePanel = document.getElementById("editFilesRenamePanel");
+const editFilesCompressPanel = document.getElementById("editFilesCompressPanel");
+const editFilesSubtitle = document.getElementById("editFilesSubtitle");
+
+function setEditFilesMode(mode) {
+  document.querySelectorAll("#editFilesModeSeg .seg-btn").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.emode === mode);
+  });
+  if (editFilesRenamePanel) editFilesRenamePanel.hidden = mode !== "rename";
+  if (editFilesCompressPanel) editFilesCompressPanel.hidden = mode !== "compress";
+  if (editFilesSubtitle) {
+    editFilesSubtitle.textContent = mode === "compress"
+      ? "이미지 용량을 줄여 새 파일로 저장해요"
+      : "여러 파일을 올려 이름을 한꺼번에 또는 하나씩 바꿔요";
+  }
+}
+
+if (editFilesModeSeg) {
+  editFilesModeSeg.querySelectorAll(".seg-btn").forEach((button) => {
+    button.addEventListener("click", () => setEditFilesMode(button.dataset.emode));
+  });
+}
+
+const compressInput = document.getElementById("compressInput");
+const compressDropzone = document.getElementById("compressDropzone");
+const compressList = document.getElementById("compressList");
+const compressEmpty = document.getElementById("compressEmpty");
+const compressCount = document.getElementById("compressCount");
+const compressSummary = document.getElementById("compressSummary");
+const compressFormat = document.getElementById("compressFormat");
+const compressQuality = document.getElementById("compressQuality");
+const compressQualityValue = document.getElementById("compressQualityValue");
+const compressQualityRow = document.getElementById("compressQualityRow");
+const compressResizeToggle = document.getElementById("compressResizeToggle");
+const compressResizeFields = document.getElementById("compressResizeFields");
+const compressMaxWidth = document.getElementById("compressMaxWidth");
+const compressApply = document.getElementById("compressApply");
+const compressDownloadAll = document.getElementById("compressDownloadAll");
+const compressClear = document.getElementById("compressClear");
+
+let compressEntries = [];
+
+function formatBytes(bytes) {
+  if (!bytes && bytes !== 0) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function compressOutName(entry, format) {
+  const ext = format === "image/png" ? ".png" : format === "image/webp" ? ".webp" : ".jpg";
+  return `${safeRenameBase(entry.base, entry.base)}_min${ext}`;
+}
+
+function loadCompressFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      const { base, ext } = splitFileName(file.name);
+      resolve({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        file,
+        originalName: file.name,
+        base,
+        ext,
+        url,
+        image,
+        originalSize: file.size,
+        out: null,
+      });
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("image load failed"));
+    };
+    image.src = url;
+  });
+}
+
+async function addCompressFiles(fileList) {
+  const files = Array.from(fileList || []).filter((file) => file.type.startsWith("image/"));
+  if (!files.length) {
+    setRenameStatus("이미지 파일만 압축할 수 있어요");
+    return;
+  }
+  const loaded = await Promise.allSettled(files.map(loadCompressFile));
+  loaded.forEach((result) => {
+    if (result.status === "fulfilled") compressEntries.push(result.value);
+  });
+  renderCompressList();
+  setRenameStatus(`${compressEntries.length}개 이미지 준비됨`);
+}
+
+function removeCompressEntry(id) {
+  const index = compressEntries.findIndex((entry) => entry.id === id);
+  if (index === -1) return;
+  const [entry] = compressEntries.splice(index, 1);
+  if (entry.url) URL.revokeObjectURL(entry.url);
+  if (entry.out) URL.revokeObjectURL(entry.out.url);
+  renderCompressList();
+}
+
+function clearCompressEntries() {
+  compressEntries.forEach((entry) => {
+    if (entry.url) URL.revokeObjectURL(entry.url);
+    if (entry.out) URL.revokeObjectURL(entry.out.url);
+  });
+  compressEntries = [];
+  renderCompressList();
+  setRenameStatus("압축 목록을 비웠어요");
+}
+
+function renderCompressList() {
+  const has = compressEntries.length > 0;
+  const done = compressEntries.filter((entry) => entry.out);
+  compressList.innerHTML = "";
+  compressEmpty.classList.toggle("is-hidden", has);
+  compressCount.textContent = `${compressEntries.length}개`;
+  compressApply.disabled = !has;
+  compressDownloadAll.disabled = done.length === 0;
+  compressClear.disabled = !has;
+
+  if (done.length) {
+    const before = done.reduce((sum, entry) => sum + entry.originalSize, 0);
+    const after = done.reduce((sum, entry) => sum + entry.out.size, 0);
+    const saved = before > 0 ? Math.round((1 - after / before) * 100) : 0;
+    compressSummary.textContent = `${formatBytes(before)} → ${formatBytes(after)} (${saved >= 0 ? "-" : "+"}${Math.abs(saved)}%)`;
+  } else {
+    compressSummary.textContent = "원본 대비 절감량이 표시돼요";
+  }
+
+  compressEntries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "rename-row";
+
+    const thumb = document.createElement("div");
+    thumb.className = "rename-thumb";
+    const img = document.createElement("img");
+    img.src = entry.url;
+    img.alt = entry.originalName;
+    thumb.append(img);
+
+    const meta = document.createElement("div");
+    meta.className = "rename-meta";
+    const orig = document.createElement("span");
+    orig.className = "rename-orig";
+    orig.textContent = entry.originalName;
+    const info = document.createElement("span");
+    info.className = "compress-info";
+    if (entry.out) {
+      const saved = entry.originalSize > 0 ? Math.round((1 - entry.out.size / entry.originalSize) * 100) : 0;
+      info.textContent = `${formatBytes(entry.originalSize)} → ${formatBytes(entry.out.size)} · ${saved >= 0 ? "-" : "+"}${Math.abs(saved)}% · ${entry.out.width}×${entry.out.height}`;
+      info.classList.toggle("is-bigger", saved < 0);
+    } else {
+      info.textContent = `원본 ${formatBytes(entry.originalSize)} · ${entry.image.naturalWidth}×${entry.image.naturalHeight}`;
+    }
+    meta.append(orig, info);
+
+    const actions = document.createElement("div");
+    actions.className = "rename-row-actions";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "mini-btn";
+    save.textContent = "저장";
+    save.disabled = !entry.out;
+    save.addEventListener("click", () => {
+      if (entry.out) downloadBlobAs(entry.out.blob, entry.out.name);
+    });
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "mini-btn danger";
+    del.textContent = "✕";
+    del.title = "목록에서 제거";
+    del.setAttribute("aria-label", "목록에서 제거");
+    del.addEventListener("click", () => removeCompressEntry(entry.id));
+    actions.append(save, del);
+
+    row.append(thumb, meta, actions);
+    compressList.append(row);
+  });
+}
+
+async function encodeCompressEntry(entry, format, quality, maxWidth) {
+  const iw = entry.image.naturalWidth;
+  const ih = entry.image.naturalHeight;
+  let tw = iw;
+  let th = ih;
+  if (maxWidth && iw > maxWidth) {
+    tw = maxWidth;
+    th = Math.max(1, Math.round((ih * maxWidth) / iw));
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = tw;
+  canvas.height = th;
+  const context = canvas.getContext("2d");
+  if (format === "image/jpeg") {
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, tw, th);
+  }
+  context.drawImage(entry.image, 0, 0, tw, th);
+  const blob = await canvasToBlob(canvas, format, format === "image/png" ? undefined : quality);
+  return { blob, width: tw, height: th };
+}
+
+async function applyCompress() {
+  if (!compressEntries.length || compressApply.disabled) return;
+  compressApply.disabled = true;
+  const format = compressFormat.value;
+  const quality = clampNumber(compressQuality.value, 10, 100, 80) / 100;
+  const maxWidth = compressResizeToggle.checked
+    ? Math.round(clampNumber(compressMaxWidth.value, 100, 10000, 1920))
+    : 0;
+  setRenameStatus("용량을 줄이는 중…");
+  for (const entry of compressEntries) {
+    try {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const result = await encodeCompressEntry(entry, format, quality, maxWidth);
+      if (entry.out) URL.revokeObjectURL(entry.out.url);
+      entry.out = {
+        blob: result.blob,
+        url: URL.createObjectURL(result.blob),
+        size: result.blob.size,
+        width: result.width,
+        height: result.height,
+        name: compressOutName(entry, format),
+      };
+    } catch (error) {
+      /* skip this file */
+    }
+  }
+  renderCompressList();
+  setRenameStatus("용량 줄이기를 적용했어요");
+}
+
+async function downloadCompressZip() {
+  const done = compressEntries.filter((entry) => entry.out);
+  if (!done.length) return;
+  setRenameStatus("ZIP 생성 중…");
+  const used = new Map();
+  const files = [];
+  for (const entry of done) {
+    let name = entry.out.name;
+    if (used.has(name)) {
+      const count = used.get(name) + 1;
+      used.set(name, count);
+      const parts = splitFileName(name);
+      name = `${parts.base}_${count}${parts.ext}`;
+    } else {
+      used.set(name, 1);
+    }
+    files.push({ name, bytes: new Uint8Array(await entry.out.blob.arrayBuffer()) });
+  }
+  downloadBlobAs(makeZip(files), `compressed_${Date.now()}.zip`);
+  setRenameStatus(`${files.length}개 파일을 ZIP으로 저장했어요`);
+}
+
+function syncCompressQualityUi() {
+  const isPng = compressFormat.value === "image/png";
+  compressQualityValue.textContent = `${compressQuality.value}%`;
+  compressQualityRow.classList.toggle("is-disabled", isPng);
+  compressQuality.disabled = isPng;
+}
+
+if (compressInput) {
+  compressInput.addEventListener("change", (event) => {
+    addCompressFiles(event.target.files);
+    compressInput.value = "";
+  });
+  wireBatchDropzone(compressDropzone, addCompressFiles);
+  compressFormat.addEventListener("change", syncCompressQualityUi);
+  compressQuality.addEventListener("input", syncCompressQualityUi);
+  compressResizeToggle.addEventListener("change", () => {
+    compressResizeFields.hidden = !compressResizeToggle.checked;
+  });
+  compressApply.addEventListener("click", applyCompress);
+  compressDownloadAll.addEventListener("click", downloadCompressZip);
+  compressClear.addEventListener("click", clearCompressEntries);
+}
+
 (function init() {
   let savedTheme = "light";
   try {
@@ -2411,10 +3539,16 @@ clearRenameWorks.addEventListener("click", clearRenameWorksEntries);
   applyTheme(savedTheme === "dark" ? "dark" : "light");
   setExportMode("native");
   setRenameMode("number");
+  setEditFilesMode("rename");
+  syncCompressQualityUi();
+  renderCompressList();
   loadWorksFromDb();
   renderBatchSources();
   renderBatchResults();
   syncBatchControls();
+  renderBatchCropSources();
+  renderBatchCropResults();
+  syncBatchCropControls();
   syncControls();
   resizeCanvasToStage();
 })();
