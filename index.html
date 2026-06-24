@@ -169,13 +169,7 @@
                         <button class="shape-btn" data-shape="star" title="별" aria-label="별">☆</button>
                         <button class="shape-btn wide" data-shape="freeform" title="자유형 선택" aria-label="자유형 선택">자유형</button>
                       </div>
-                      <p class="popup-label">크기 프리셋</p>
-                      <div class="preset-row">
-                        <button class="size-preset" data-size="1080x1080">정사각</button>
-                        <button class="size-preset" data-size="1920x1080">가로형</button>
-                        <button class="size-preset" data-size="1200x628">광고</button>
-                        <button class="size-preset" data-size="720x720">소형</button>
-                      </div>
+                      <p class="popup-hint">Shift 드래그로 정비율 · Alt 드래그로 회전</p>
                     </div>
                   </div>
                 </div>
@@ -249,7 +243,7 @@
               </button>
               <div class="export-detail" id="exportDetail" hidden>
                 <div class="export-current">
-                  현재 커터 크기
+                  현재 선택된 커터 크기
                   <strong id="exportCurrent">— × —</strong>
                 </div>
                 <div class="seg" role="group" aria-label="저장 해상도 방식">
@@ -298,7 +292,10 @@
             <section class="control-block batch-source-block">
               <div class="block-head">
                 <h2>원본 이미지 업로드</h2>
-                <span id="batchCropSourceCount" class="count-chip">0개</span>
+                <div class="head-tools">
+                  <button type="button" class="link-btn" id="batchCropSelectAll" hidden>전체 해제</button>
+                  <span id="batchCropSourceCount" class="count-chip">0개</span>
+                </div>
               </div>
               <label class="batch-dropzone" id="batchCropSourceDropzone">
                 <input id="batchCropSourceInput" type="file" accept="image/png,image/jpeg,image/webp" multiple />
@@ -310,7 +307,7 @@
 
             <section class="control-block batch-overlay-block">
               <div class="block-head"><h2>자르기 영역</h2></div>
-              <p class="block-note">미리보기 위에서 영역을 드래그해 그리거나 모서리로 조절하세요. 같은 비율 영역이 모든 이미지에 적용돼요.</p>
+              <p class="block-note">미리보기 위에서 영역을 드래그해 그리거나 모서리로 조절하세요. 사진마다 영역을 따로 지정할 수 있고, 체크한 사진만 잘라냅니다.</p>
               <div class="seg" id="batchCropRatioSeg" role="group" aria-label="자르기 비율">
                 <button type="button" class="seg-btn is-active" data-ratio="free">자유</button>
                 <button type="button" class="seg-btn" data-ratio="1:1">1:1</button>
@@ -363,6 +360,19 @@
                       <label>파일 접두어<input id="batchCropPrefix" type="text" value="crop" /></label>
                       <label>형식<select id="batchCropFormat"><option value="image/png">PNG</option><option value="image/jpeg">JPG</option><option value="image/webp">WebP</option></select></label>
                     </div>
+                    <p class="popup-label">저장 해상도</p>
+                    <div class="seg batch-export-seg" id="bcropExportSeg" role="group" aria-label="저장 해상도">
+                      <button type="button" class="seg-btn is-active" data-bexport="native">원본</button>
+                      <button type="button" class="seg-btn" data-bexport="scale">배율 %</button>
+                      <button type="button" class="seg-btn" data-bexport="custom">직접 입력</button>
+                    </div>
+                    <div class="batch-export-fields" id="bcropScaleField" hidden>
+                      <label>배율 (%)<input id="bcropExportScale" type="number" min="1" max="1000" step="5" value="100" /></label>
+                    </div>
+                    <div class="batch-export-fields batch-export-fields--two" id="bcropCustomField" hidden>
+                      <label>가로 (px)<input id="bcropExportWidth" type="number" min="1" max="20000" value="1080" /></label>
+                      <label>세로 (px)<input id="bcropExportHeight" type="number" min="1" max="20000" value="1080" /></label>
+                    </div>
                     <label class="toggle-line"><input id="batchCropAutoDownload" type="checkbox" />완료할 때마다 바로 다운로드</label>
                   </div>
                 </details>
@@ -389,7 +399,10 @@
             <section class="control-block batch-source-block">
               <div class="block-head">
                 <h2>원본 이미지 업로드</h2>
-                <span id="batchSourceCount" class="count-chip">0개</span>
+                <div class="head-tools">
+                  <button type="button" class="link-btn" id="batchSelectAll" hidden>전체 해제</button>
+                  <span id="batchSourceCount" class="count-chip">0개</span>
+                </div>
               </div>
               <label class="batch-dropzone" id="batchSourceDropzone">
                 <input id="batchSourceInput" type="file" accept="image/png,image/jpeg,image/webp" multiple />
@@ -421,7 +434,7 @@
             </div>
             <div class="batch-preview-footer">
               <div>
-                <p class="batch-preview-hint">이미지를 드래그해 이동하고, 모서리로 크기를 조절하세요.</p>
+                <p class="batch-preview-hint">이미지를 드래그해 이동하고, 모서리로 크기를 조절하세요. 사진마다 위치를 따로 지정할 수 있고, 체크한 사진만 처리합니다.</p>
                 <div class="batch-progress" id="batchProgress" hidden>
                   <span id="batchProgressText">0 / 0</span>
                   <progress id="batchProgressBar" value="0" max="1"></progress>
@@ -447,6 +460,19 @@
                     <div class="number-row">
                       <label>파일 접두어<input id="batchPrefix" type="text" value="pasted" /></label>
                       <label>형식<select id="batchFormat"><option value="image/png">PNG</option><option value="image/jpeg">JPG</option><option value="image/webp">WebP</option></select></label>
+                    </div>
+                    <p class="popup-label">저장 해상도</p>
+                    <div class="seg batch-export-seg" id="bpasteExportSeg" role="group" aria-label="저장 해상도">
+                      <button type="button" class="seg-btn is-active" data-bexport="native">원본</button>
+                      <button type="button" class="seg-btn" data-bexport="scale">배율 %</button>
+                      <button type="button" class="seg-btn" data-bexport="custom">직접 입력</button>
+                    </div>
+                    <div class="batch-export-fields" id="bpasteScaleField" hidden>
+                      <label>배율 (%)<input id="bpasteExportScale" type="number" min="1" max="1000" step="5" value="100" /></label>
+                    </div>
+                    <div class="batch-export-fields batch-export-fields--two" id="bpasteCustomField" hidden>
+                      <label>가로 (px)<input id="bpasteExportWidth" type="number" min="1" max="20000" value="1080" /></label>
+                      <label>세로 (px)<input id="bpasteExportHeight" type="number" min="1" max="20000" value="1080" /></label>
                     </div>
                     <label class="toggle-line"><input id="batchAutoDownload" type="checkbox" />완료할 때마다 바로 다운로드</label>
                   </div>
@@ -676,6 +702,23 @@
           </div>
         </section>
       </main>
+    </div>
+
+    <button type="button" class="howto-fab" id="howtoFab" aria-haspopup="dialog" aria-controls="howtoModal">
+      <span aria-hidden="true">▶</span> 사용법
+    </button>
+
+    <div class="howto-modal" id="howtoModal" hidden>
+      <div class="howto-backdrop" data-howto-close></div>
+      <div class="howto-dialog" role="dialog" aria-modal="true" aria-labelledby="howtoTitle">
+        <header class="howto-head">
+          <h2 id="howtoTitle">사용 방법</h2>
+          <button type="button" class="howto-close" id="howtoClose" aria-label="닫기">×</button>
+        </header>
+        <div class="howto-stage" id="howtoStage"></div>
+        <ol class="howto-steps" id="howtoSteps"></ol>
+        <p class="howto-note">움직이는 안내는 직접 제작한 데모예요. 이 품질로 각 탭에 맞춰 더 다듬을 수 있어요.</p>
+      </div>
     </div>
 
     <script src="app.js"></script>

@@ -171,7 +171,12 @@ const crop = {
   y: 0,
   width: 1080,
   height: 1920,
+  angle: 0,
 };
+
+let isRotatingShape = false;
+let rotateStartAngle = 0;
+let rotatePointerStart = 0;
 
 function setStatus(message) {
   statusPill.textContent = message;
@@ -353,7 +358,9 @@ function drawStage() {
   ctx.fillRect(displayOffsetX, displayOffsetY, displayWidth, displayHeight);
   ctx.drawImage(sourceImage, displayOffsetX, displayOffsetY, displayWidth, displayHeight);
 
-  drawGuides(displayOffsetX, displayOffsetY, displayWidth, displayHeight);
+  // Guides are pinned to the canvas viewport, not the image, so they stay put
+  // while the image is panned or zoomed.
+  drawGuides(0, 0, size.width, size.height);
 
   if (activeShape === "freeform") {
     drawFreeformPreview();
@@ -363,14 +370,23 @@ function drawStage() {
   if (!cropActive && !isDrawingShape) return;
 
   const rect = cropToDisplayRect();
+  const centerX = rect.x + rect.width / 2;
+  const centerY = rect.y + rect.height / 2;
   ctx.save();
   ctx.fillStyle = "rgba(45, 212, 191, 0.18)";
   ctx.strokeStyle = "#2dd4bf";
   ctx.lineWidth = 2;
   ctx.setLineDash([9, 7]);
+  ctx.save();
+  if (crop.angle) {
+    ctx.translate(centerX, centerY);
+    ctx.rotate(crop.angle);
+    ctx.translate(-centerX, -centerY);
+  }
   applyShapePath(ctx, activeShape, rect.x, rect.y, rect.width, rect.height);
   ctx.fill();
   ctx.stroke();
+  ctx.restore();
   ctx.setLineDash([]);
   ctx.strokeStyle = "rgba(255, 255, 255, 0.45)";
   ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
@@ -524,20 +540,48 @@ function setCropSize(width, height) {
   crop.height = nextHeight;
   crop.x = Math.round(centerX - nextWidth / 2);
   crop.y = Math.round(centerY - nextHeight / 2);
+  crop.angle = 0;
   cropActive = true;
   syncControls();
   drawStage();
 }
 
-function updateDrawBounds(currentPoint) {
+function updateDrawBounds(currentPoint, square) {
   const point = clampPointToImage(currentPoint);
-  crop.x = Math.min(drawOriginX, point.x);
-  crop.y = Math.min(drawOriginY, point.y);
-  crop.width = Math.max(1, Math.abs(point.x - drawOriginX));
-  crop.height = Math.max(1, Math.abs(point.y - drawOriginY));
+  let w = Math.abs(point.x - drawOriginX);
+  let h = Math.abs(point.y - drawOriginY);
+  if (square) {
+    const s = Math.max(w, h);
+    w = s;
+    h = s;
+  }
+  crop.x = point.x < drawOriginX ? drawOriginX - w : drawOriginX;
+  crop.y = point.y < drawOriginY ? drawOriginY - h : drawOriginY;
+  if (sourceImage) {
+    crop.x = Math.max(0, Math.min(crop.x, sourceImage.naturalWidth - 1));
+    crop.y = Math.max(0, Math.min(crop.y, sourceImage.naturalHeight - 1));
+    w = Math.min(w, sourceImage.naturalWidth - crop.x);
+    h = Math.min(h, sourceImage.naturalHeight - crop.y);
+    if (square) {
+      const s = Math.min(w, h);
+      w = s;
+      h = s;
+    }
+  }
+  crop.width = Math.max(1, w);
+  crop.height = Math.max(1, h);
   cropWidthInput.value = Math.round(crop.width);
   cropHeightInput.value = Math.round(crop.height);
   cutterMeta.textContent = `${Math.round(crop.width)} x ${Math.round(crop.height)}`;
+}
+
+function cropCenterClient() {
+  const canvasRect = stageCanvas.getBoundingClientRect();
+  const rect = cropToDisplayRect();
+  return {
+    x: canvasRect.left + rect.x + rect.width / 2,
+    y: canvasRect.top + rect.y + rect.height / 2,
+  };
 }
 
 function hitHandle(clientX, clientY) {
@@ -677,6 +721,7 @@ function loadFile(file) {
     cropActive = false;
     isDrawingShape = false;
     pendingDraw = false;
+    crop.angle = 0;
     resizeCanvasToStage();
     syncControls();
     resetHistory();
@@ -734,10 +779,23 @@ async function stampCrop() {
   outputCtx.save();
   if (activeShape === "freeform") {
     applyFreeformOutputPath(outputCtx, bounds);
+    outputCtx.clip();
   } else {
+    const ocx = output.width / 2;
+    const ocy = output.height / 2;
+    if (crop.angle) {
+      outputCtx.translate(ocx, ocy);
+      outputCtx.rotate(crop.angle);
+      outputCtx.translate(-ocx, -ocy);
+    }
     applyShapePath(outputCtx, activeShape, 0, 0, output.width, output.height);
+    outputCtx.clip();
+    if (crop.angle) {
+      outputCtx.translate(ocx, ocy);
+      outputCtx.rotate(-crop.angle);
+      outputCtx.translate(-ocx, -ocy);
+    }
   }
-  outputCtx.clip();
   outputCtx.drawImage(
     sourceImage,
     Math.round(bounds.x),
@@ -1199,6 +1257,17 @@ stageCanvas.addEventListener("pointerdown", (event) => {
 
   if (event.button !== 0) return;
 
+  // Alt + drag rotates the current shape around its center.
+  if (event.altKey && cropActive && activeShape !== "freeform") {
+    isRotatingShape = true;
+    const center = cropCenterClient();
+    rotatePointerStart = Math.atan2(event.clientY - center.y, event.clientX - center.x);
+    rotateStartAngle = crop.angle;
+    stageCanvas.setPointerCapture(event.pointerId);
+    setStatus("도형을 회전하는 중 (Shift: 15° 단위)");
+    return;
+  }
+
   const imagePoint = clampPointToImage(displayPointToImage(event.clientX, event.clientY));
 
   if (activeShape === "freeform") {
@@ -1231,6 +1300,7 @@ stageCanvas.addEventListener("pointerdown", (event) => {
   pendingDraw = true;
   drawOriginX = imagePoint.x;
   drawOriginY = imagePoint.y;
+  crop.angle = 0;
   stageCanvas.setPointerCapture(event.pointerId);
 });
 
@@ -1246,6 +1316,18 @@ stageCanvas.addEventListener("pointermove", (event) => {
     panStartX = event.clientX;
     panStartY = event.clientY;
     clampPan();
+    drawStage();
+    return;
+  }
+
+  if (isRotatingShape) {
+    const center = cropCenterClient();
+    let angle = rotateStartAngle + (Math.atan2(event.clientY - center.y, event.clientX - center.x) - rotatePointerStart);
+    if (event.shiftKey) {
+      const step = Math.PI / 12;
+      angle = Math.round(angle / step) * step;
+    }
+    crop.angle = angle;
     drawStage();
     return;
   }
@@ -1272,7 +1354,7 @@ stageCanvas.addEventListener("pointermove", (event) => {
   }
 
   if (isDrawingShape) {
-    updateDrawBounds(displayPointToImage(event.clientX, event.clientY));
+    updateDrawBounds(displayPointToImage(event.clientX, event.clientY), event.shiftKey);
     drawStage();
     return;
   }
@@ -1293,6 +1375,16 @@ stageCanvas.addEventListener("pointerup", (event) => {
     isPanning = false;
     stageCanvas.releasePointerCapture(event.pointerId);
     stageCanvas.style.cursor = spaceHeld ? "grab" : "crosshair";
+    return;
+  }
+
+  if (isRotatingShape) {
+    isRotatingShape = false;
+    stageCanvas.releasePointerCapture(event.pointerId);
+    syncControls();
+    commitHistory();
+    const degrees = ((Math.round((crop.angle * 180) / Math.PI) % 360) + 360) % 360;
+    setStatus(`도형을 ${degrees}° 회전했어요`);
     return;
   }
 
@@ -1355,6 +1447,17 @@ stageCanvas.addEventListener("pointerup", (event) => {
       stageCanvas.releasePointerCapture(event.pointerId);
     } catch (error) {
       /* pointer already released */
+    }
+    // A single click on empty space cancels the current selection.
+    if (!pointerMoved && (cropActive || freeformPoints.length)) {
+      cropActive = false;
+      isDrawingShape = false;
+      freeformPoints = [];
+      crop.angle = 0;
+      syncControls();
+      drawStage();
+      commitHistory();
+      setStatus("선택을 취소했어요");
     }
   }
 });
@@ -1552,6 +1655,7 @@ function serializeState() {
     shape: activeShape,
     active: cropActive,
     crop: { x: Math.round(crop.x), y: Math.round(crop.y), w: Math.round(crop.width), h: Math.round(crop.height) },
+    angle: Math.round((crop.angle || 0) * 1000),
     free: freeformPoints.map((point) => [Math.round(point.x), Math.round(point.y)]),
   });
 }
@@ -1605,6 +1709,7 @@ function applySnapshot(snap) {
   crop.y = snap.crop.y;
   crop.width = snap.crop.width;
   crop.height = snap.crop.height;
+  crop.angle = snap.crop.angle || 0;
   freeformPoints = snap.freeform.map((point) => ({ ...point }));
   cropWidthInput.value = Math.round(crop.width);
   cropHeightInput.value = Math.round(crop.height);
@@ -1673,6 +1778,7 @@ function transformSource(kind) {
     isDrawingShape = false;
     pendingDraw = false;
     freeformPoints = [];
+    crop.angle = 0;
     fitImageToStage();
     syncControls();
     updateZoomLabel();
@@ -1710,6 +1816,63 @@ function setBatchStatus(message) {
   if (batchStatus) batchStatus.textContent = message;
 }
 
+const batchSelectAll = document.getElementById("batchSelectAll");
+
+// Shared "저장 해상도" (export resolution) control used by the batch tools.
+function computeExportDimensions(baseW, baseH, mode, scaleValue, customW, customH) {
+  const bw = Math.max(1, Math.round(baseW));
+  const bh = Math.max(1, Math.round(baseH));
+  if (mode === "scale") {
+    const percent = clampNumber(scaleValue, 1, 1000, 100) / 100;
+    return { width: Math.max(1, Math.round(bw * percent)), height: Math.max(1, Math.round(bh * percent)) };
+  }
+  if (mode === "custom") {
+    return {
+      width: Math.max(1, Math.round(clampNumber(customW, 1, 20000, bw))),
+      height: Math.max(1, Math.round(clampNumber(customH, 1, 20000, bh))),
+    };
+  }
+  return { width: bw, height: bh };
+}
+
+function setupBatchExport(prefix) {
+  const seg = document.getElementById(`${prefix}ExportSeg`);
+  const scaleField = document.getElementById(`${prefix}ScaleField`);
+  const customField = document.getElementById(`${prefix}CustomField`);
+  const scaleInput = document.getElementById(`${prefix}ExportScale`);
+  const widthInput = document.getElementById(`${prefix}ExportWidth`);
+  const heightInput = document.getElementById(`${prefix}ExportHeight`);
+  const state = { mode: "native" };
+  function setMode(mode) {
+    state.mode = mode;
+    seg.querySelectorAll(".seg-btn").forEach((button) => {
+      button.classList.toggle("is-active", button.dataset.bexport === mode);
+    });
+    if (scaleField) scaleField.hidden = mode !== "scale";
+    if (customField) customField.hidden = mode !== "custom";
+  }
+  if (seg) {
+    seg.querySelectorAll(".seg-btn").forEach((button) => {
+      button.addEventListener("click", () => setMode(button.dataset.bexport));
+    });
+    setMode("native");
+  }
+  return {
+    size(baseW, baseH) {
+      return computeExportDimensions(
+        baseW,
+        baseH,
+        state.mode,
+        scaleInput ? scaleInput.value : 100,
+        widthInput ? widthInput.value : baseW,
+        heightInput ? heightInput.value : baseH
+      );
+    },
+  };
+}
+
+const bpasteExport = setupBatchExport("bpaste");
+
 function loadBatchImage(file) {
   return new Promise((resolve, reject) => {
     if (!file || !file.type.startsWith("image/")) {
@@ -1743,7 +1906,13 @@ async function addBatchSources(files) {
   setBatchStatus(`${selected.length}개 이미지를 불러오는 중`);
   const loaded = await Promise.allSettled(selected.map(loadBatchImage));
   loaded.forEach((result) => {
-    if (result.status === "fulfilled") batchSources.push(result.value);
+    if (result.status === "fulfilled") {
+      const src = result.value;
+      src.transform = { x: 0.77, y: 0.77, width: 0.2 };
+      src.selected = true;
+      if (batchOverlay) resetBatchOverlayTransformFor(src);
+      batchSources.push(src);
+    }
   });
   if (batchSelectedSource >= batchSources.length) batchSelectedSource = Math.max(0, batchSources.length - 1);
   renderBatchSources();
@@ -1768,7 +1937,7 @@ async function setBatchOverlay(file) {
     image.alt = file.name;
     batchOverlayPreview.append(image);
     batchOverlayName.textContent = file.name;
-    resetBatchOverlayTransform();
+    batchSources.forEach(resetBatchOverlayTransformFor);
     drawBatchPreview();
     syncBatchControls();
     setBatchStatus("붙여넣을 이미지 준비됨");
@@ -1781,10 +1950,26 @@ function renderBatchSources() {
   batchSourceGrid.innerHTML = "";
   batchSources.forEach((source, index) => {
     const card = document.createElement("article");
-    card.className = `batch-file-card${index === batchSelectedSource ? " is-active" : ""}`;
+    card.className = `batch-file-card${index === batchSelectedSource ? " is-active" : ""}${source.selected ? " is-selected" : ""}`;
     card.tabIndex = 0;
     card.setAttribute("role", "button");
     card.setAttribute("aria-label", `${source.file.name} 미리보기`);
+
+    const check = document.createElement("label");
+    check.className = "batch-file-check";
+    check.title = "처리 대상 선택";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(source.selected);
+    checkbox.setAttribute("aria-label", `${source.file.name} 처리 대상`);
+    checkbox.addEventListener("click", (event) => event.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      source.selected = checkbox.checked;
+      card.classList.toggle("is-selected", source.selected);
+      syncBatchControls();
+      updateBatchSelectAll();
+    });
+    check.append(checkbox);
 
     const image = document.createElement("img");
     image.src = source.url;
@@ -1821,10 +2006,22 @@ function renderBatchSources() {
       setBatchStatus(batchSources.length ? `${batchSources.length}개 원본 이미지 준비됨` : "원본 이미지를 업로드하세요");
     });
 
-    card.append(image, name, remove);
+    card.append(check, image, name, remove);
     batchSourceGrid.append(card);
   });
   batchSourceCount.textContent = `${batchSources.length}개`;
+  updateBatchSelectAll();
+}
+
+function selectedBatchSources() {
+  return batchSources.filter((source) => source.selected);
+}
+
+function updateBatchSelectAll() {
+  if (!batchSelectAll) return;
+  batchSelectAll.hidden = batchSources.length === 0;
+  const allOn = batchSources.length > 0 && batchSources.every((source) => source.selected);
+  batchSelectAll.textContent = allOn ? "전체 해제" : "전체 선택";
 }
 
 function getBatchOverlayRatio() {
@@ -1832,41 +2029,41 @@ function getBatchOverlayRatio() {
   return batchOverlay.image.naturalHeight / batchOverlay.image.naturalWidth;
 }
 
-function getBatchPlacement(baseWidth, baseHeight) {
+function getBatchPlacement(baseWidth, baseHeight, transform = batchOverlayTransform) {
   const ratio = getBatchOverlayRatio();
   const minWidth = Math.min(0.08, 24 / baseWidth);
   const maxWidth = Math.min(0.96, (baseHeight * 0.96) / (baseWidth * ratio));
-  const widthFraction = Math.min(maxWidth, Math.max(minWidth, batchOverlayTransform.width));
+  const widthFraction = Math.min(maxWidth, Math.max(minWidth, transform.width));
   const width = baseWidth * widthFraction;
   const height = width * ratio;
   const maxX = Math.max(0, baseWidth - width);
   const maxY = Math.max(0, baseHeight - height);
   return {
-    x: Math.min(maxX, Math.max(0, batchOverlayTransform.x * baseWidth)),
-    y: Math.min(maxY, Math.max(0, batchOverlayTransform.y * baseHeight)),
+    x: Math.min(maxX, Math.max(0, transform.x * baseWidth)),
+    y: Math.min(maxY, Math.max(0, transform.y * baseHeight)),
     width,
     height,
   };
 }
 
-function constrainBatchOverlayTransform(baseWidth, baseHeight) {
+function constrainBatchOverlayTransform(baseWidth, baseHeight, transform = batchOverlayTransform) {
   if (!batchOverlay) return;
-  const placement = getBatchPlacement(baseWidth, baseHeight);
-  batchOverlayTransform.width = placement.width / baseWidth;
-  batchOverlayTransform.x = placement.x / baseWidth;
-  batchOverlayTransform.y = placement.y / baseHeight;
+  const placement = getBatchPlacement(baseWidth, baseHeight, transform);
+  transform.width = placement.width / baseWidth;
+  transform.x = placement.x / baseWidth;
+  transform.y = placement.y / baseHeight;
 }
 
-function resetBatchOverlayTransform() {
-  const source = batchSources[batchSelectedSource];
-  batchOverlayTransform = { x: 0.77, y: 0.77, width: 0.2 };
-  if (!source || !batchOverlay) return;
+function resetBatchOverlayTransformFor(source) {
+  if (!source) return;
+  source.transform = { x: 0.77, y: 0.77, width: 0.2 };
+  if (!batchOverlay) return;
   const baseWidth = source.image.naturalWidth;
   const baseHeight = source.image.naturalHeight;
-  constrainBatchOverlayTransform(baseWidth, baseHeight);
-  const placement = getBatchPlacement(baseWidth, baseHeight);
-  batchOverlayTransform.x = Math.max(0, (baseWidth - placement.width) / baseWidth - 0.03);
-  batchOverlayTransform.y = Math.max(0, (baseHeight - placement.height) / baseHeight - 0.03);
+  constrainBatchOverlayTransform(baseWidth, baseHeight, source.transform);
+  const placement = getBatchPlacement(baseWidth, baseHeight, source.transform);
+  source.transform.x = Math.max(0, (baseWidth - placement.width) / baseWidth - 0.03);
+  source.transform.y = Math.max(0, (baseHeight - placement.height) / baseHeight - 0.03);
 }
 
 function drawBatchPreview() {
@@ -1892,8 +2089,9 @@ function drawBatchPreview() {
   context.drawImage(source.image, originX, originY, drawWidth, drawHeight);
 
   if (batchOverlay) {
-    constrainBatchOverlayTransform(baseWidth, baseHeight);
-    const placement = getBatchPlacement(baseWidth, baseHeight);
+    batchOverlayTransform = source.transform;
+    constrainBatchOverlayTransform(baseWidth, baseHeight, source.transform);
+    const placement = getBatchPlacement(baseWidth, baseHeight, source.transform);
     context.save();
     context.beginPath();
     context.rect(originX, originY, drawWidth, drawHeight);
@@ -2044,12 +2242,13 @@ batchPreviewCanvas.addEventListener("pointerup", endBatchOverlayInteraction);
 batchPreviewCanvas.addEventListener("pointercancel", endBatchOverlayInteraction);
 
 function syncBatchControls() {
-  const ready = batchSources.length > 0 && Boolean(batchOverlay);
+  const selectedCount = selectedBatchSources().length;
+  const ready = selectedCount > 0 && Boolean(batchOverlay);
   batchRunBtn.disabled = !ready || batchRunning;
   batchCancelBtn.disabled = !batchRunning || batchCancelRequested;
   batchRunBtn.textContent = batchRunning
     ? "처리 중..."
-    : ready ? `${batchSources.length}개 일괄 붙여넣기` : "일괄 붙여넣기";
+    : ready ? `선택한 ${selectedCount}개 붙여넣기` : "일괄 붙여넣기";
   [batchSourceInput, batchOverlayInput, batchPrefix, batchFormat].forEach((control) => {
     control.disabled = batchRunning;
   });
@@ -2124,13 +2323,14 @@ function clearBatchResults() {
 }
 
 async function runBatchPaste() {
-  if (batchRunning || !batchSources.length || !batchOverlay) return;
+  const targets = selectedBatchSources();
+  if (batchRunning || !targets.length || !batchOverlay) return;
   batchRunning = true;
   batchCancelRequested = false;
   batchProgress.hidden = false;
-  batchProgressBar.max = batchSources.length;
+  batchProgressBar.max = targets.length;
   batchProgressBar.value = 0;
-  batchProgressText.textContent = `0 / ${batchSources.length}`;
+  batchProgressText.textContent = `0 / ${targets.length}`;
   syncBatchControls();
   renderBatchResults();
 
@@ -2141,22 +2341,33 @@ async function runBatchPaste() {
   let failed = false;
 
   try {
-    for (const source of batchSources) {
+    for (const source of targets) {
       if (batchCancelRequested) break;
       setBatchStatus(`${source.file.name} 처리 중`);
       await new Promise((resolve) => requestAnimationFrame(resolve));
 
+      const baseW = source.image.naturalWidth;
+      const baseH = source.image.naturalHeight;
+      const out = bpasteExport.size(baseW, baseH);
+      const sx = out.width / baseW;
+      const sy = out.height / baseH;
       const output = document.createElement("canvas");
-      output.width = source.image.naturalWidth;
-      output.height = source.image.naturalHeight;
+      output.width = out.width;
+      output.height = out.height;
       const context = output.getContext("2d");
       if (mimeType === "image/jpeg") {
         context.fillStyle = "#ffffff";
         context.fillRect(0, 0, output.width, output.height);
       }
-      context.drawImage(source.image, 0, 0);
-      const placement = getBatchPlacement(output.width, output.height);
-      context.drawImage(batchOverlay.image, placement.x, placement.y, placement.width, placement.height);
+      context.drawImage(source.image, 0, 0, output.width, output.height);
+      const placement = getBatchPlacement(baseW, baseH, source.transform);
+      context.drawImage(
+        batchOverlay.image,
+        placement.x * sx,
+        placement.y * sy,
+        placement.width * sx,
+        placement.height * sy
+      );
 
       const blob = await canvasToBlob(output, mimeType);
       const originalName = source.file.name.replace(/\.[^.]+$/, "");
@@ -2173,7 +2384,7 @@ async function runBatchPaste() {
       batchResults.push(item);
       completed += 1;
       batchProgressBar.value = completed;
-      batchProgressText.textContent = `${completed} / ${batchSources.length}`;
+      batchProgressText.textContent = `${completed} / ${targets.length}`;
       renderBatchResults();
       if (batchAutoDownload.checked) downloadOne(item);
     }
@@ -2249,6 +2460,15 @@ batchRunBtn.addEventListener("click", runBatchPaste);
 batchCancelBtn.addEventListener("click", cancelBatchPaste);
 batchDownloadAll.addEventListener("click", downloadBatchZip);
 batchClearResults.addEventListener("click", clearBatchResults);
+if (batchSelectAll) {
+  batchSelectAll.addEventListener("click", () => {
+    if (batchRunning || !batchSources.length) return;
+    const turnOn = !batchSources.every((source) => source.selected);
+    batchSources.forEach((source) => (source.selected = turnOn));
+    renderBatchSources();
+    syncBatchControls();
+  });
+}
 
 /* ============================================================
    Batch crop — apply one crop region to many images
@@ -2283,8 +2503,12 @@ const worksBatchCropCount = document.getElementById("worksBatchCropCount");
 const downloadBatchCropWorks = document.getElementById("downloadBatchCropWorks");
 const clearBatchCropWorks = document.getElementById("clearBatchCropWorks");
 
+const batchCropSelectAll = document.getElementById("batchCropSelectAll");
+const bcropExport = setupBatchExport("bcrop");
+
 let batchCropSources = [];
 let batchCropSelected = 0;
+// Alias to the currently previewed source's rect (per-image crop region).
 let batchCropRect = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
 let batchCropResults = [];
 let batchCropRunning = false;
@@ -2333,9 +2557,20 @@ function constrainBatchCropRect() {
   rect.y = Math.min(Math.max(0, rect.y), 1 - rect.height);
 }
 
-function resetBatchCropRect() {
-  batchCropRect = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
-  constrainBatchCropRect();
+function pointCropRectToCurrent() {
+  const source = currentBatchCropSource();
+  if (source) batchCropRect = source.rect;
+}
+
+// Write a new rect into the currently previewed source so it stays per-image.
+function writeCropRect(next) {
+  const source = currentBatchCropSource();
+  const target = source ? source.rect : batchCropRect;
+  target.x = next.x;
+  target.y = next.y;
+  target.width = next.width;
+  target.height = next.height;
+  batchCropRect = target;
 }
 
 async function addBatchCropSources(files) {
@@ -2346,28 +2581,60 @@ async function addBatchCropSources(files) {
     setBatchCropStatus(available ? "사용할 수 있는 이미지 파일이 없어요" : "원본 이미지는 최대 50개까지 추가할 수 있어요");
     return;
   }
-  const wasEmpty = batchCropSources.length === 0;
   setBatchCropStatus(`${selected.length}개 이미지를 불러오는 중`);
   const loaded = await Promise.allSettled(selected.map(loadBatchImage));
   loaded.forEach((result) => {
-    if (result.status === "fulfilled") batchCropSources.push(result.value);
+    if (result.status === "fulfilled") {
+      const src = result.value;
+      src.rect = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
+      src.selected = true;
+      batchCropSources.push(src);
+    }
   });
   if (batchCropSelected >= batchCropSources.length) batchCropSelected = Math.max(0, batchCropSources.length - 1);
-  if (wasEmpty) resetBatchCropRect();
+  pointCropRectToCurrent();
+  constrainBatchCropRect();
   renderBatchCropSources();
   drawBatchCropPreview();
   syncBatchCropControls();
   setBatchCropStatus(`${batchCropSources.length}개 원본 이미지 준비됨`);
 }
 
+function selectedBatchCropSources() {
+  return batchCropSources.filter((source) => source.selected);
+}
+
+function updateBatchCropSelectAll() {
+  if (!batchCropSelectAll) return;
+  batchCropSelectAll.hidden = batchCropSources.length === 0;
+  const allOn = batchCropSources.length > 0 && batchCropSources.every((source) => source.selected);
+  batchCropSelectAll.textContent = allOn ? "전체 해제" : "전체 선택";
+}
+
 function renderBatchCropSources() {
   batchCropSourceGrid.innerHTML = "";
   batchCropSources.forEach((source, index) => {
     const card = document.createElement("article");
-    card.className = `batch-file-card${index === batchCropSelected ? " is-active" : ""}`;
+    card.className = `batch-file-card${index === batchCropSelected ? " is-active" : ""}${source.selected ? " is-selected" : ""}`;
     card.tabIndex = 0;
     card.setAttribute("role", "button");
     card.setAttribute("aria-label", `${source.file.name} 미리보기`);
+
+    const check = document.createElement("label");
+    check.className = "batch-file-check";
+    check.title = "처리 대상 선택";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(source.selected);
+    checkbox.setAttribute("aria-label", `${source.file.name} 처리 대상`);
+    checkbox.addEventListener("click", (event) => event.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      source.selected = checkbox.checked;
+      card.classList.toggle("is-selected", source.selected);
+      syncBatchCropControls();
+      updateBatchCropSelectAll();
+    });
+    check.append(checkbox);
 
     const image = document.createElement("img");
     image.src = source.url;
@@ -2382,6 +2649,7 @@ function renderBatchCropSources() {
 
     const select = () => {
       batchCropSelected = index;
+      pointCropRectToCurrent();
       constrainBatchCropRect();
       renderBatchCropSources();
       drawBatchCropPreview();
@@ -2399,16 +2667,18 @@ function renderBatchCropSources() {
       URL.revokeObjectURL(source.url);
       batchCropSources.splice(index, 1);
       batchCropSelected = Math.min(batchCropSelected, Math.max(0, batchCropSources.length - 1));
+      pointCropRectToCurrent();
       renderBatchCropSources();
       drawBatchCropPreview();
       syncBatchCropControls();
       setBatchCropStatus(batchCropSources.length ? `${batchCropSources.length}개 원본 이미지 준비됨` : "원본 이미지를 업로드하세요");
     });
 
-    card.append(image, name, remove);
+    card.append(check, image, name, remove);
     batchCropSourceGrid.append(card);
   });
   batchCropSourceCount.textContent = `${batchCropSources.length}개`;
+  updateBatchCropSelectAll();
 }
 
 function drawBatchCropPreview() {
@@ -2421,6 +2691,7 @@ function drawBatchCropPreview() {
   batchCropPreviewName.textContent = source ? source.file.name : "선택된 원본 없음";
   batchCropPreviewEmpty.classList.toggle("is-hidden", Boolean(source));
   if (!source) return;
+  batchCropRect = source.rect;
 
   const baseWidth = source.image.naturalWidth;
   const baseHeight = source.image.naturalHeight;
@@ -2573,12 +2844,12 @@ batchCropPreviewCanvas.addEventListener("pointermove", (event) => {
   const point = getBatchCropPoint(event);
   if (batchCropDrawing) {
     const norm = batchCropNormalized(point);
-    batchCropRect = {
+    writeCropRect({
       x: Math.min(batchCropDrawing.x, norm.x),
       y: Math.min(batchCropDrawing.y, norm.y),
       width: Math.max(0.02, Math.abs(norm.x - batchCropDrawing.x)),
       height: Math.max(0.02, Math.abs(norm.y - batchCropDrawing.y)),
-    };
+    });
     constrainBatchCropRect();
     drawBatchCropPreview();
     return;
@@ -2593,7 +2864,7 @@ batchCropPreviewCanvas.addEventListener("pointermove", (event) => {
   const dy = current.y - interaction.start.y;
   const original = interaction.original;
   if (interaction.type === "move") {
-    batchCropRect = { ...original, x: original.x + dx, y: original.y + dy };
+    writeCropRect({ ...original, x: original.x + dx, y: original.y + dy });
   } else {
     let left = original.x;
     let top = original.y;
@@ -2603,7 +2874,7 @@ batchCropPreviewCanvas.addEventListener("pointermove", (event) => {
     if (interaction.handle.includes("e")) right = Math.max(original.x + original.width + dx, left + 0.02);
     if (interaction.handle.includes("n")) top = Math.min(original.y + dy, bottom - 0.02);
     if (interaction.handle.includes("s")) bottom = Math.max(original.y + original.height + dy, top + 0.02);
-    batchCropRect = { x: left, y: top, width: right - left, height: bottom - top };
+    writeCropRect({ x: left, y: top, width: right - left, height: bottom - top });
   }
   constrainBatchCropRect();
   drawBatchCropPreview();
@@ -2625,12 +2896,13 @@ batchCropPreviewCanvas.addEventListener("pointerup", endBatchCropInteraction);
 batchCropPreviewCanvas.addEventListener("pointercancel", endBatchCropInteraction);
 
 function syncBatchCropControls() {
-  const ready = batchCropSources.length > 0;
+  const selectedCount = selectedBatchCropSources().length;
+  const ready = selectedCount > 0;
   batchCropRunBtn.disabled = !ready || batchCropRunning;
   batchCropCancelBtn.disabled = !batchCropRunning || batchCropCancelRequested;
   batchCropRunBtn.textContent = batchCropRunning
     ? "처리 중..."
-    : ready ? `${batchCropSources.length}개 일괄 자르기` : "일괄 자르기";
+    : ready ? `선택한 ${selectedCount}개 자르기` : "일괄 자르기";
   [batchCropSourceInput, batchCropPrefix, batchCropFormat].forEach((control) => {
     if (control) control.disabled = batchCropRunning;
   });
@@ -2706,13 +2978,14 @@ function clearBatchCropResultsAll() {
 }
 
 async function runBatchCrop() {
-  if (batchCropRunning || !batchCropSources.length) return;
+  const targets = selectedBatchCropSources();
+  if (batchCropRunning || !targets.length) return;
   batchCropRunning = true;
   batchCropCancelRequested = false;
   batchCropProgress.hidden = false;
-  batchCropProgressBar.max = batchCropSources.length;
+  batchCropProgressBar.max = targets.length;
   batchCropProgressBar.value = 0;
-  batchCropProgressText.textContent = `0 / ${batchCropSources.length}`;
+  batchCropProgressText.textContent = `0 / ${targets.length}`;
   syncBatchCropControls();
   renderBatchCropResults();
 
@@ -2723,31 +2996,33 @@ async function runBatchCrop() {
   let failed = false;
 
   try {
-    for (const source of batchCropSources) {
+    for (const source of targets) {
       if (batchCropCancelRequested) break;
       setBatchCropStatus(`${source.file.name} 처리 중`);
       await new Promise((resolve) => requestAnimationFrame(resolve));
 
       const baseW = source.image.naturalWidth;
       const baseH = source.image.naturalHeight;
-      let cw = Math.max(1, Math.round(batchCropRect.width * baseW));
-      let ch = Math.max(1, Math.round(batchCropRect.height * baseH));
-      let cx = Math.round(batchCropRect.x * baseW);
-      let cy = Math.round(batchCropRect.y * baseH);
+      const rect = source.rect;
+      let cw = Math.max(1, Math.round(rect.width * baseW));
+      let ch = Math.max(1, Math.round(rect.height * baseH));
+      let cx = Math.round(rect.x * baseW);
+      let cy = Math.round(rect.y * baseH);
       cw = Math.min(cw, baseW);
       ch = Math.min(ch, baseH);
       cx = Math.min(Math.max(0, cx), baseW - cw);
       cy = Math.min(Math.max(0, cy), baseH - ch);
 
+      const out = bcropExport.size(cw, ch);
       const output = document.createElement("canvas");
-      output.width = cw;
-      output.height = ch;
+      output.width = out.width;
+      output.height = out.height;
       const context = output.getContext("2d");
       if (mimeType === "image/jpeg") {
         context.fillStyle = "#ffffff";
-        context.fillRect(0, 0, cw, ch);
+        context.fillRect(0, 0, out.width, out.height);
       }
-      context.drawImage(source.image, cx, cy, cw, ch, 0, 0, cw, ch);
+      context.drawImage(source.image, cx, cy, cw, ch, 0, 0, out.width, out.height);
 
       const blob = await canvasToBlob(output, mimeType);
       const originalName = source.file.name.replace(/\.[^.]+$/, "");
@@ -2757,14 +3032,14 @@ async function runBatchCrop() {
         blob,
         url: URL.createObjectURL(blob),
         file: `${safePrefix}_${serial}_${originalName}.${extension}`,
-        width: cw,
-        height: ch,
+        width: out.width,
+        height: out.height,
         date: Date.now(),
       };
       batchCropResults.push(item);
       completed += 1;
       batchCropProgressBar.value = completed;
-      batchCropProgressText.textContent = `${completed} / ${batchCropSources.length}`;
+      batchCropProgressText.textContent = `${completed} / ${targets.length}`;
       renderBatchCropResults();
       if (batchCropAutoDownload.checked) downloadOne(item);
     }
@@ -2826,6 +3101,15 @@ batchCropDownloadAll.addEventListener("click", downloadBatchCropZip);
 batchCropClearResults.addEventListener("click", clearBatchCropResultsAll);
 if (downloadBatchCropWorks) downloadBatchCropWorks.addEventListener("click", downloadBatchCropZip);
 if (clearBatchCropWorks) clearBatchCropWorks.addEventListener("click", clearBatchCropResultsAll);
+if (batchCropSelectAll) {
+  batchCropSelectAll.addEventListener("click", () => {
+    if (batchCropRunning || !batchCropSources.length) return;
+    const turnOn = !batchCropSources.every((source) => source.selected);
+    batchCropSources.forEach((source) => (source.selected = turnOn));
+    renderBatchCropSources();
+    syncBatchCropControls();
+  });
+}
 
 /* ============================================================
    IndexedDB — persistent "내 작업" store
@@ -2900,12 +3184,16 @@ async function loadWorksFromDb() {
 /* ============================================================
    View switching + theme
    ============================================================ */
+let currentViewName = "edit";
+
 function setView(name, navButton) {
   Object.entries(views).forEach(([key, element]) => {
     if (element) element.hidden = key !== name;
   });
   navItems.forEach((button) => button.classList.remove("is-active"));
   if (navButton) navButton.classList.add("is-active");
+  currentViewName = name;
+  updateHowtoFab();
   if (name === "edit") requestAnimationFrame(resizeCanvasToStage);
   if (name === "batch") requestAnimationFrame(drawBatchPreview);
   if (name === "batchcrop") requestAnimationFrame(drawBatchCropPreview);
@@ -3529,6 +3817,138 @@ if (compressInput) {
   compressClear.addEventListener("click", clearCompressEntries);
 }
 
+/* ============================================================
+   사용 방법 — 움직이는(애니메이션) 안내 데모
+   ============================================================ */
+const howtoFab = document.getElementById("howtoFab");
+const howtoModal = document.getElementById("howtoModal");
+const howtoStage = document.getElementById("howtoStage");
+const howtoSteps = document.getElementById("howtoSteps");
+const howtoTitle = document.getElementById("howtoTitle");
+const howtoClose = document.getElementById("howtoClose");
+
+const HOWTO_PHOTO_DEFS = `
+  <defs>
+    <linearGradient id="hoPhoto" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbcfe8" />
+      <stop offset="1" stop-color="#c7d2fe" />
+    </linearGradient>
+  </defs>`;
+
+function howtoScenery(x, y, w, h) {
+  return `
+    <circle cx="${x + w * 0.24}" cy="${y + h * 0.32}" r="${h * 0.12}" fill="#fde68a" />
+    <path d="M${x} ${y + h * 0.82} L${x + w * 0.3} ${y + h * 0.5} L${x + w * 0.5} ${y + h * 0.72} L${x + w * 0.68} ${y + h * 0.56} L${x + w} ${y + h * 0.86} L${x + w} ${y + h} L${x} ${y + h} Z" fill="#a7f3d0" opacity="0.9" />`;
+}
+
+const HOWTO = {
+  edit: {
+    title: "쉽게 자르기",
+    steps: [
+      "이미지를 업로드해요.",
+      "도형을 골라 이미지 위에서 드래그해 영역을 그려요. (Shift=정비율, Alt=회전)",
+      "‘현재 영역 자르기’를 누르면 결과에 바로 담겨요.",
+    ],
+    svg: `<svg viewBox="0 0 320 190" class="ho-svg" role="img" aria-label="자르기 동작 미리보기">
+      ${HOWTO_PHOTO_DEFS}
+      <rect x="30" y="24" width="180" height="142" rx="12" fill="url(#hoPhoto)" />
+      ${howtoScenery(30, 24, 180, 142)}
+      <rect class="ho-cropbox" x="64" y="52" width="8" height="8" rx="3" fill="rgba(45,212,191,0.18)" stroke="#14b8a6" stroke-width="2.5" stroke-dasharray="7 6" />
+      <g class="ho-cursor"><path d="M0 0 L0 19 L5 14 L9 22 L13 20 L9 13 L16 13 Z" fill="#1f2330" stroke="#fff" stroke-width="1.3" /></g>
+      <g class="ho-result">
+        <rect x="240" y="60" width="62" height="62" rx="10" fill="url(#hoPhoto)" stroke="#fff" stroke-width="3" />
+        <circle cx="258" cy="80" r="8" fill="#fde68a" />
+      </g>
+      <text x="240" y="142" class="ho-result" fill="#16a34a" font-size="13" font-weight="800">저장됨 ✓</text>
+    </svg>`,
+  },
+  batchcrop: {
+    title: "일괄 자르기",
+    steps: [
+      "여러 이미지를 업로드해요.",
+      "사진마다 자를 영역을 지정하고, 처리할 사진을 체크해요.",
+      "‘선택한 N개 자르기’를 누르면 한 번에 잘려요.",
+    ],
+    svg: `<svg viewBox="0 0 320 190" class="ho-svg" role="img" aria-label="일괄 자르기 미리보기">
+      ${HOWTO_PHOTO_DEFS}
+      <g class="ho-fade1"><rect x="18" y="22" width="58" height="44" rx="7" fill="url(#hoPhoto)" /><rect x="22" y="26" width="14" height="14" rx="3" fill="#fff" stroke="#e24a99" stroke-width="2" /><path class="ho-tick" d="M25 33 l3 3 l6 -7" fill="none" stroke="#e24a99" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></g>
+      <g class="ho-fade2"><rect x="18" y="74" width="58" height="44" rx="7" fill="url(#hoPhoto)" /><rect x="22" y="78" width="14" height="14" rx="3" fill="#fff" stroke="#e24a99" stroke-width="2" /><path class="ho-tick" d="M25 85 l3 3 l6 -7" fill="none" stroke="#e24a99" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></g>
+      <g class="ho-fade3"><rect x="18" y="126" width="58" height="44" rx="7" fill="url(#hoPhoto)" /><rect x="22" y="130" width="14" height="14" rx="3" fill="#fff" stroke="#e24a99" stroke-width="2" /><path class="ho-tick" d="M25 137 l3 3 l6 -7" fill="none" stroke="#e24a99" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></g>
+      <rect x="104" y="40" width="118" height="100" rx="10" fill="url(#hoPhoto)" />
+      ${howtoScenery(104, 40, 118, 100)}
+      <rect class="ho-cropbox2" x="124" y="58" width="78" height="64" rx="4" fill="rgba(45,212,191,0.16)" stroke="#14b8a6" stroke-width="2.5" stroke-dasharray="7 6" />
+      <g class="ho-result"><rect x="246" y="56" width="56" height="46" rx="8" fill="url(#hoPhoto)" stroke="#fff" stroke-width="3" /><rect x="246" y="110" width="56" height="46" rx="8" fill="url(#hoPhoto)" stroke="#fff" stroke-width="3" /></g>
+    </svg>`,
+  },
+  batch: {
+    title: "일괄 붙여넣기",
+    steps: [
+      "원본 이미지들과 붙여넣을 이미지(로고 등)를 올려요.",
+      "사진마다 위치·크기를 맞추고, 처리할 사진을 체크해요.",
+      "‘선택한 N개 붙여넣기’로 한 번에 합성해요.",
+    ],
+    svg: `<svg viewBox="0 0 320 190" class="ho-svg" role="img" aria-label="일괄 붙여넣기 미리보기">
+      ${HOWTO_PHOTO_DEFS}
+      <rect x="40" y="30" width="150" height="130" rx="12" fill="url(#hoPhoto)" />
+      ${howtoScenery(40, 30, 150, 130)}
+      <g class="ho-stamp"><rect x="150" y="120" width="34" height="34" rx="8" fill="#1f2330" /><text x="167" y="143" fill="#fff" font-size="18" font-weight="800" text-anchor="middle">★</text></g>
+      <g class="ho-result">
+        <rect x="222" y="40" width="80" height="46" rx="8" fill="url(#hoPhoto)" stroke="#fff" stroke-width="3" /><rect x="286" y="68" width="13" height="13" rx="3" fill="#1f2330" />
+        <rect x="222" y="100" width="80" height="46" rx="8" fill="url(#hoPhoto)" stroke="#fff" stroke-width="3" /><rect x="286" y="128" width="13" height="13" rx="3" fill="#1f2330" />
+      </g>
+    </svg>`,
+  },
+  rename: {
+    title: "파일 일괄 편집하기",
+    steps: [
+      "파일을 올려요.",
+      "‘파일명 변경’에서 번호·찾기바꾸기·접두접미로 한 번에 정리해요.",
+      "‘용량 줄이기’에서 품질·크기를 조절해 가볍게 저장해요.",
+    ],
+    svg: `<svg viewBox="0 0 320 190" class="ho-svg" role="img" aria-label="파일 편집 미리보기">
+      <g class="ho-fade1"><rect x="22" y="24" width="276" height="40" rx="9" fill="#f4f5fa" stroke="#e5e7f0" /><text x="36" y="49" font-size="13" font-weight="700" fill="#9aa0b4">IMG_2207.jpg</text><text x="180" y="49" font-size="13" font-weight="800" fill="#e24a99">→ photo_001.jpg</text></g>
+      <g class="ho-fade2"><rect x="22" y="74" width="276" height="40" rx="9" fill="#f4f5fa" stroke="#e5e7f0" /><text x="36" y="99" font-size="13" font-weight="700" fill="#9aa0b4">IMG_2208.jpg</text><text x="180" y="99" font-size="13" font-weight="800" fill="#e24a99">→ photo_002.jpg</text></g>
+      <g class="ho-fade3"><rect x="22" y="124" width="276" height="46" rx="9" fill="#f4f5fa" stroke="#e5e7f0" /><text x="36" y="146" font-size="12" font-weight="700" fill="#9aa0b4">사진.png · 2.4MB</text>
+        <rect x="36" y="152" width="180" height="8" rx="4" fill="#e5e7f0" /><rect class="ho-shrink" x="36" y="152" width="180" height="8" rx="4" fill="#16a34a" />
+        <text x="232" y="159" font-size="12" font-weight="800" fill="#16a34a">0.6MB</text></g>
+    </svg>`,
+  },
+};
+
+function updateHowtoFab() {
+  if (!howtoFab) return;
+  howtoFab.hidden = !HOWTO[currentViewName];
+}
+
+function openHowto() {
+  const data = HOWTO[currentViewName];
+  if (!data || !howtoModal) return;
+  howtoTitle.textContent = `${data.title} · 사용 방법`;
+  howtoStage.innerHTML = data.svg;
+  howtoSteps.innerHTML = "";
+  data.steps.forEach((step) => {
+    const li = document.createElement("li");
+    li.textContent = step;
+    howtoSteps.append(li);
+  });
+  howtoModal.hidden = false;
+}
+
+function closeHowto() {
+  if (howtoModal) howtoModal.hidden = true;
+}
+
+if (howtoFab) howtoFab.addEventListener("click", openHowto);
+if (howtoClose) howtoClose.addEventListener("click", closeHowto);
+if (howtoModal) {
+  howtoModal.addEventListener("click", (event) => {
+    if (event.target.hasAttribute("data-howto-close")) closeHowto();
+  });
+}
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && howtoModal && !howtoModal.hidden) closeHowto();
+});
+
 (function init() {
   let savedTheme = "light";
   try {
@@ -3550,5 +3970,6 @@ if (compressInput) {
   renderBatchCropResults();
   syncBatchCropControls();
   syncControls();
+  updateHowtoFab();
   resizeCanvasToStage();
 })();
