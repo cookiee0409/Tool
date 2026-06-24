@@ -1895,13 +1895,113 @@ p {
   cursor: pointer;
 }
 
-/* Unselected sources are dimmed so it is clear what will be processed. */
-.batch-file-card:not(.is-selected) {
-  opacity: 0.5;
+/* Checked = part of the "move together" group. */
+.batch-file-card.is-linked .batch-file-check,
+.batch-list-item.is-linked .batch-file-check {
+  background: var(--accent);
 }
 
-.batch-file-card.is-selected {
-  opacity: 1;
+/* List view (10+ sources): 2 columns × 5 rows, column-major. */
+.batch-file-grid.is-list {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: repeat(5, auto);
+  gap: 6px;
+}
+
+.batch-list-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 8px 5px 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.batch-list-item.is-active {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.batch-list-item .batch-file-check {
+  top: 50%;
+  left: 6px;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+}
+
+.batch-list-item img {
+  width: 30px;
+  height: 30px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--surface-2);
+  flex: 0 0 auto;
+}
+
+.batch-list-item span {
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-list-item .batch-file-remove {
+  position: static;
+  flex: 0 0 auto;
+  min-width: 22px;
+  min-height: 22px;
+}
+
+.batch-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 10px;
+}
+
+.batch-pager[hidden] {
+  display: none;
+}
+
+.crop-size-row,
+.paste-pos-row {
+  grid-template-columns: 1fr 1fr;
+  margin-top: 6px;
+}
+
+.pager-btn {
+  min-width: 30px;
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.pager-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pager-label {
+  font-size: 12.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
 }
 
 .batch-export-seg {

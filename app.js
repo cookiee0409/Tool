@@ -1817,6 +1817,8 @@ function setBatchStatus(message) {
 }
 
 const batchSelectAll = document.getElementById("batchSelectAll");
+const pastePosX = document.getElementById("pastePosX");
+const pastePosY = document.getElementById("pastePosY");
 
 // Shared "저장 해상도" (export resolution) control used by the batch tools.
 function computeExportDimensions(baseW, baseH, mode, scaleValue, customW, customH) {
@@ -1946,57 +1948,149 @@ async function setBatchOverlay(file) {
   }
 }
 
-function renderBatchSources() {
-  batchSourceGrid.innerHTML = "";
-  batchSources.forEach((source, index) => {
-    const card = document.createElement("article");
-    card.className = `batch-file-card${index === batchSelectedSource ? " is-active" : ""}${source.selected ? " is-selected" : ""}`;
-    card.tabIndex = 0;
-    card.setAttribute("role", "button");
-    card.setAttribute("aria-label", `${source.file.name} 미리보기`);
+// Shared upload workspace renderer: ≤9 sources show as thumbnails,
+// 10+ switch to a paginated 2-column × 5-row list with arrow paging.
+const batchSourcePager = { page: 0 };
+const batchCropSourcePager = { page: 0 };
 
-    const check = document.createElement("label");
-    check.className = "batch-file-check";
-    check.title = "처리 대상 선택";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = Boolean(source.selected);
-    checkbox.setAttribute("aria-label", `${source.file.name} 처리 대상`);
-    checkbox.addEventListener("click", (event) => event.stopPropagation());
-    checkbox.addEventListener("change", () => {
-      source.selected = checkbox.checked;
-      card.classList.toggle("is-selected", source.selected);
-      syncBatchControls();
-      updateBatchSelectAll();
+function buildSourceItem(source, index, opts) {
+  const card = document.createElement("article");
+  card.className = `${opts.list ? "batch-list-item" : "batch-file-card"}${index === opts.selectedIndex ? " is-active" : ""}${source.selected ? " is-linked" : ""}`;
+  card.tabIndex = 0;
+  card.setAttribute("role", "button");
+  card.setAttribute("aria-label", `${source.file.name} 미리보기`);
+
+  const check = document.createElement("label");
+  check.className = "batch-file-check";
+  check.title = "같이 이동할 사진 묶기";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = Boolean(source.selected);
+  checkbox.setAttribute("aria-label", `${source.file.name} 같이 이동`);
+  checkbox.addEventListener("click", (event) => event.stopPropagation());
+  checkbox.addEventListener("change", () => opts.onToggle(index, checkbox.checked));
+  check.append(checkbox);
+
+  const image = document.createElement("img");
+  image.src = source.url;
+  image.alt = "";
+  const name = document.createElement("span");
+  name.textContent = source.file.name;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "batch-file-remove";
+  remove.textContent = "×";
+  remove.setAttribute("aria-label", `${source.file.name} 제거`);
+
+  const select = () => opts.onPreview(index);
+  card.addEventListener("click", select);
+  card.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      select();
+    }
+  });
+  remove.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (opts.running) return;
+    opts.onRemove(index);
+  });
+
+  card.append(check, image, name, remove);
+  return card;
+}
+
+function renderSourceWorkspace(opts) {
+  const { grid, sources, pageState } = opts;
+  grid.innerHTML = "";
+  const list = sources.length > 9;
+  grid.classList.toggle("is-list", list);
+
+  let pager = grid.parentElement.querySelector(`.batch-pager[data-for="${grid.id}"]`);
+  let visible = sources.map((source, index) => ({ source, index }));
+
+  if (list) {
+    const pageSize = 10;
+    const pages = Math.max(1, Math.ceil(sources.length / pageSize));
+    pageState.page = Math.min(Math.max(0, pageState.page), pages - 1);
+    visible = visible.slice(pageState.page * pageSize, pageState.page * pageSize + pageSize);
+    if (!pager) {
+      pager = document.createElement("div");
+      pager.className = "batch-pager";
+      pager.dataset.for = grid.id;
+      grid.insertAdjacentElement("afterend", pager);
+    }
+    pager.hidden = false;
+    pager.innerHTML = "";
+    const prev = document.createElement("button");
+    prev.type = "button";
+    prev.className = "pager-btn";
+    prev.textContent = "‹";
+    prev.disabled = pageState.page <= 0;
+    prev.addEventListener("click", () => {
+      pageState.page -= 1;
+      opts.rerender();
     });
-    check.append(checkbox);
+    const label = document.createElement("span");
+    label.className = "pager-label";
+    label.textContent = `${pageState.page + 1} / ${pages}`;
+    const next = document.createElement("button");
+    next.type = "button";
+    next.className = "pager-btn";
+    next.textContent = "›";
+    next.disabled = pageState.page >= pages - 1;
+    next.addEventListener("click", () => {
+      pageState.page += 1;
+      opts.rerender();
+    });
+    pager.append(prev, label, next);
+  } else if (pager) {
+    pager.hidden = true;
+  }
 
-    const image = document.createElement("img");
-    image.src = source.url;
-    image.alt = "";
-    const name = document.createElement("span");
-    name.textContent = source.file.name;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "batch-file-remove";
-    remove.textContent = "×";
-    remove.setAttribute("aria-label", `${source.file.name} 제거`);
+  visible.forEach(({ source, index }) => {
+    grid.append(buildSourceItem(source, index, opts));
+  });
+}
 
-    const select = () => {
+function adoptOverlayGroup(index) {
+  const current = batchSources[batchSelectedSource];
+  const ref = current && current.selected && batchSelectedSource !== index
+    ? current
+    : batchSources.find((source, i) => i !== index && source.selected);
+  if (ref) batchSources[index].transform = { ...ref.transform };
+}
+
+function propagateOverlayTransform() {
+  const current = batchSources[batchSelectedSource];
+  if (!current || !current.selected) return;
+  batchSources.forEach((source, index) => {
+    if (index !== batchSelectedSource && source.selected) source.transform = { ...current.transform };
+  });
+}
+
+function renderBatchSources() {
+  renderSourceWorkspace({
+    grid: batchSourceGrid,
+    sources: batchSources,
+    selectedIndex: batchSelectedSource,
+    running: batchRunning,
+    pageState: batchSourcePager,
+    rerender: renderBatchSources,
+    onPreview(index) {
       batchSelectedSource = index;
       renderBatchSources();
       drawBatchPreview();
-    };
-    card.addEventListener("click", select);
-    card.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        select();
-      }
-    });
-    remove.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (batchRunning) return;
+    },
+    onToggle(index, checked) {
+      batchSources[index].selected = checked;
+      if (checked) adoptOverlayGroup(index);
+      renderBatchSources();
+      drawBatchPreview();
+      updateBatchSelectAll();
+    },
+    onRemove(index) {
+      const source = batchSources[index];
       URL.revokeObjectURL(source.url);
       batchSources.splice(index, 1);
       batchSelectedSource = Math.min(batchSelectedSource, Math.max(0, batchSources.length - 1));
@@ -2004,17 +2098,10 @@ function renderBatchSources() {
       drawBatchPreview();
       syncBatchControls();
       setBatchStatus(batchSources.length ? `${batchSources.length}개 원본 이미지 준비됨` : "원본 이미지를 업로드하세요");
-    });
-
-    card.append(check, image, name, remove);
-    batchSourceGrid.append(card);
+    },
   });
   batchSourceCount.textContent = `${batchSources.length}개`;
   updateBatchSelectAll();
-}
-
-function selectedBatchSources() {
-  return batchSources.filter((source) => source.selected);
 }
 
 function updateBatchSelectAll() {
@@ -2131,8 +2218,62 @@ function drawBatchPreview() {
       context.strokeRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
     });
     context.restore();
+
+    // Dashed crosshair through the paste center, with position percentages.
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    const xPct = Math.round(((cx - originX) / drawWidth) * 100);
+    const yPct = Math.round(((cy - originY) / drawHeight) * 100);
+    context.save();
+    context.strokeStyle = "rgba(59, 111, 224, 0.95)";
+    context.lineWidth = 1.5;
+    context.setLineDash([6, 5]);
+    context.beginPath();
+    context.moveTo(cx, originY);
+    context.lineTo(cx, originY + drawHeight);
+    context.moveTo(originX, cy);
+    context.lineTo(originX + drawWidth, cy);
+    context.stroke();
+    context.setLineDash([]);
+    context.font = "800 13px Segoe UI, sans-serif";
+    const drawLabel = (text, lx, ly, align, baseline) => {
+      context.textAlign = align;
+      context.textBaseline = baseline;
+      context.lineWidth = 3;
+      context.strokeStyle = "#ffffff";
+      context.strokeText(text, lx, ly);
+      context.fillStyle = "#3b6fe0";
+      context.fillText(text, lx, ly);
+    };
+    drawLabel(`${xPct}%`, cx, Math.min(originY + drawHeight - 8, canvasHeight - 6), "center", "alphabetic");
+    drawLabel(`${yPct}%`, Math.min(originX + drawWidth - 6, canvasWidth - 6), cy, "right", "middle");
+    context.restore();
+    updatePastePosInputs(xPct, yPct);
+
     batchPreviewFrame = { originX, originY, scale, baseWidth, baseHeight, box };
   }
+}
+
+function updatePastePosInputs(xPct, yPct) {
+  if (pastePosX && document.activeElement !== pastePosX) pastePosX.value = xPct;
+  if (pastePosY && document.activeElement !== pastePosY) pastePosY.value = yPct;
+}
+
+function applyPastePosition() {
+  const source = batchSources[batchSelectedSource];
+  if (!source || !batchOverlay) return;
+  const baseW = source.image.naturalWidth;
+  const baseH = source.image.naturalHeight;
+  const placement = getBatchPlacement(baseW, baseH, source.transform);
+  const halfW = placement.width / baseW / 2;
+  const halfH = placement.height / baseH / 2;
+  const cx = clampNumber(pastePosX.value, 0, 100, 50) / 100;
+  const cy = clampNumber(pastePosY.value, 0, 100, 50) / 100;
+  source.transform.x = cx - halfW;
+  source.transform.y = cy - halfH;
+  constrainBatchOverlayTransform(baseW, baseH, source.transform);
+  propagateOverlayTransform();
+  drawBatchPreview();
 }
 
 function getBatchPreviewPoint(event) {
@@ -2224,6 +2365,7 @@ batchPreviewCanvas.addEventListener("pointermove", (event) => {
       : interaction.original.y;
   }
   constrainBatchOverlayTransform(batchPreviewFrame.baseWidth, batchPreviewFrame.baseHeight);
+  propagateOverlayTransform();
   drawBatchPreview();
 });
 
@@ -2242,13 +2384,12 @@ batchPreviewCanvas.addEventListener("pointerup", endBatchOverlayInteraction);
 batchPreviewCanvas.addEventListener("pointercancel", endBatchOverlayInteraction);
 
 function syncBatchControls() {
-  const selectedCount = selectedBatchSources().length;
-  const ready = selectedCount > 0 && Boolean(batchOverlay);
+  const ready = batchSources.length > 0 && Boolean(batchOverlay);
   batchRunBtn.disabled = !ready || batchRunning;
   batchCancelBtn.disabled = !batchRunning || batchCancelRequested;
   batchRunBtn.textContent = batchRunning
     ? "처리 중..."
-    : ready ? `선택한 ${selectedCount}개 붙여넣기` : "일괄 붙여넣기";
+    : ready ? `${batchSources.length}개 붙여넣기` : "일괄 붙여넣기";
   [batchSourceInput, batchOverlayInput, batchPrefix, batchFormat].forEach((control) => {
     control.disabled = batchRunning;
   });
@@ -2323,7 +2464,7 @@ function clearBatchResults() {
 }
 
 async function runBatchPaste() {
-  const targets = selectedBatchSources();
+  const targets = batchSources;
   if (batchRunning || !targets.length || !batchOverlay) return;
   batchRunning = true;
   batchCancelRequested = false;
@@ -2460,12 +2601,19 @@ batchRunBtn.addEventListener("click", runBatchPaste);
 batchCancelBtn.addEventListener("click", cancelBatchPaste);
 batchDownloadAll.addEventListener("click", downloadBatchZip);
 batchClearResults.addEventListener("click", clearBatchResults);
+if (pastePosX) pastePosX.addEventListener("change", applyPastePosition);
+if (pastePosY) pastePosY.addEventListener("change", applyPastePosition);
 if (batchSelectAll) {
   batchSelectAll.addEventListener("click", () => {
     if (batchRunning || !batchSources.length) return;
     const turnOn = !batchSources.every((source) => source.selected);
     batchSources.forEach((source) => (source.selected = turnOn));
+    if (turnOn) {
+      const ref = batchSources[batchSelectedSource] || batchSources[0];
+      batchSources.forEach((source) => (source.transform = { ...ref.transform }));
+    }
     renderBatchSources();
+    drawBatchPreview();
     syncBatchControls();
   });
 }
@@ -2478,7 +2626,8 @@ const batchCropSourceInput = document.getElementById("batchCropSourceInput");
 const batchCropSourceDropzone = document.getElementById("batchCropSourceDropzone");
 const batchCropSourceGrid = document.getElementById("batchCropSourceGrid");
 const batchCropSourceCount = document.getElementById("batchCropSourceCount");
-const batchCropRatioSeg = document.getElementById("batchCropRatioSeg");
+const batchCropWInput = document.getElementById("batchCropW");
+const batchCropHInput = document.getElementById("batchCropH");
 const batchCropFromCenter = document.getElementById("batchCropFromCenter");
 const batchCropPreviewCanvas = document.getElementById("batchCropPreviewCanvas");
 const batchCropPreviewEmpty = document.getElementById("batchCropPreviewEmpty");
@@ -2521,34 +2670,14 @@ function setBatchCropStatus(message) {
   if (batchCropStatus) batchCropStatus.textContent = message;
 }
 
-function batchCropAspect() {
-  const active = batchCropRatioSeg.querySelector(".seg-btn.is-active");
-  const value = active ? active.dataset.ratio : "free";
-  if (value === "free") return null;
-  const [a, b] = value.split(":").map(Number);
-  return a > 0 && b > 0 ? a / b : null;
-}
-
 function currentBatchCropSource() {
   return batchCropSources[batchCropSelected] || null;
 }
 
 function constrainBatchCropRect() {
-  const source = currentBatchCropSource();
   const rect = batchCropRect;
-  const baseW = source ? source.image.naturalWidth : 1;
-  const baseH = source ? source.image.naturalHeight : 1;
   rect.width = Math.min(1, Math.max(0.02, rect.width));
   rect.height = Math.min(1, Math.max(0.02, rect.height));
-
-  const aspect = batchCropAspect();
-  if (aspect) {
-    rect.height = (rect.width * baseW) / (baseH * aspect);
-    if (rect.height > 1) {
-      rect.height = 1;
-      rect.width = (rect.height * baseH * aspect) / baseW;
-    }
-  }
   if (batchCropFromCenter && batchCropFromCenter.checked) {
     rect.x = (1 - rect.width) / 2;
     rect.y = (1 - rect.height) / 2;
@@ -2560,6 +2689,53 @@ function constrainBatchCropRect() {
 function pointCropRectToCurrent() {
   const source = currentBatchCropSource();
   if (source) batchCropRect = source.rect;
+}
+
+function adoptCropGroup(index) {
+  const current = batchCropSources[batchCropSelected];
+  const ref = current && current.selected && batchCropSelected !== index
+    ? current
+    : batchCropSources.find((source, i) => i !== index && source.selected);
+  if (ref) batchCropSources[index].rect = { ...ref.rect };
+}
+
+function propagateCropRect() {
+  const current = batchCropSources[batchCropSelected];
+  if (!current || !current.selected) return;
+  batchCropSources.forEach((source, index) => {
+    if (index !== batchCropSelected && source.selected) source.rect = { ...current.rect };
+  });
+}
+
+function updateBatchCropSizeInputs() {
+  const source = currentBatchCropSource();
+  if (!source) return;
+  if (batchCropWInput && document.activeElement !== batchCropWInput) {
+    batchCropWInput.value = Math.round(source.rect.width * source.image.naturalWidth);
+  }
+  if (batchCropHInput && document.activeElement !== batchCropHInput) {
+    batchCropHInput.value = Math.round(source.rect.height * source.image.naturalHeight);
+  }
+}
+
+function applyBatchCropSize() {
+  const source = currentBatchCropSource();
+  if (!source) return;
+  const baseW = source.image.naturalWidth;
+  const baseH = source.image.naturalHeight;
+  const rect = source.rect;
+  const centerX = rect.x + rect.width / 2;
+  const centerY = rect.y + rect.height / 2;
+  const pw = clampNumber(batchCropWInput.value, 1, baseW, Math.round(rect.width * baseW));
+  const ph = clampNumber(batchCropHInput.value, 1, baseH, Math.round(rect.height * baseH));
+  rect.width = pw / baseW;
+  rect.height = ph / baseH;
+  rect.x = centerX - rect.width / 2;
+  rect.y = centerY - rect.height / 2;
+  batchCropRect = rect;
+  constrainBatchCropRect();
+  propagateCropRect();
+  drawBatchCropPreview();
 }
 
 // Write a new rect into the currently previewed source so it stays per-image.
@@ -2600,10 +2776,6 @@ async function addBatchCropSources(files) {
   setBatchCropStatus(`${batchCropSources.length}개 원본 이미지 준비됨`);
 }
 
-function selectedBatchCropSources() {
-  return batchCropSources.filter((source) => source.selected);
-}
-
 function updateBatchCropSelectAll() {
   if (!batchCropSelectAll) return;
   batchCropSelectAll.hidden = batchCropSources.length === 0;
@@ -2612,58 +2784,29 @@ function updateBatchCropSelectAll() {
 }
 
 function renderBatchCropSources() {
-  batchCropSourceGrid.innerHTML = "";
-  batchCropSources.forEach((source, index) => {
-    const card = document.createElement("article");
-    card.className = `batch-file-card${index === batchCropSelected ? " is-active" : ""}${source.selected ? " is-selected" : ""}`;
-    card.tabIndex = 0;
-    card.setAttribute("role", "button");
-    card.setAttribute("aria-label", `${source.file.name} 미리보기`);
-
-    const check = document.createElement("label");
-    check.className = "batch-file-check";
-    check.title = "처리 대상 선택";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = Boolean(source.selected);
-    checkbox.setAttribute("aria-label", `${source.file.name} 처리 대상`);
-    checkbox.addEventListener("click", (event) => event.stopPropagation());
-    checkbox.addEventListener("change", () => {
-      source.selected = checkbox.checked;
-      card.classList.toggle("is-selected", source.selected);
-      syncBatchCropControls();
-      updateBatchCropSelectAll();
-    });
-    check.append(checkbox);
-
-    const image = document.createElement("img");
-    image.src = source.url;
-    image.alt = "";
-    const name = document.createElement("span");
-    name.textContent = source.file.name;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "batch-file-remove";
-    remove.textContent = "×";
-    remove.setAttribute("aria-label", `${source.file.name} 제거`);
-
-    const select = () => {
+  renderSourceWorkspace({
+    grid: batchCropSourceGrid,
+    sources: batchCropSources,
+    selectedIndex: batchCropSelected,
+    running: batchCropRunning,
+    pageState: batchCropSourcePager,
+    rerender: renderBatchCropSources,
+    onPreview(index) {
       batchCropSelected = index;
       pointCropRectToCurrent();
       constrainBatchCropRect();
       renderBatchCropSources();
       drawBatchCropPreview();
-    };
-    card.addEventListener("click", select);
-    card.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        select();
-      }
-    });
-    remove.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (batchCropRunning) return;
+    },
+    onToggle(index, checked) {
+      batchCropSources[index].selected = checked;
+      if (checked) adoptCropGroup(index);
+      renderBatchCropSources();
+      drawBatchCropPreview();
+      updateBatchCropSelectAll();
+    },
+    onRemove(index) {
+      const source = batchCropSources[index];
       URL.revokeObjectURL(source.url);
       batchCropSources.splice(index, 1);
       batchCropSelected = Math.min(batchCropSelected, Math.max(0, batchCropSources.length - 1));
@@ -2672,10 +2815,7 @@ function renderBatchCropSources() {
       drawBatchCropPreview();
       syncBatchCropControls();
       setBatchCropStatus(batchCropSources.length ? `${batchCropSources.length}개 원본 이미지 준비됨` : "원본 이미지를 업로드하세요");
-    });
-
-    card.append(check, image, name, remove);
-    batchCropSourceGrid.append(card);
+    },
   });
   batchCropSourceCount.textContent = `${batchCropSources.length}개`;
   updateBatchCropSelectAll();
@@ -2705,6 +2845,7 @@ function drawBatchCropPreview() {
   context.drawImage(source.image, originX, originY, drawWidth, drawHeight);
 
   constrainBatchCropRect();
+  updateBatchCropSizeInputs();
   const box = {
     x: originX + batchCropRect.x * drawWidth,
     y: originY + batchCropRect.y * drawHeight,
@@ -2851,6 +2992,7 @@ batchCropPreviewCanvas.addEventListener("pointermove", (event) => {
       height: Math.max(0.02, Math.abs(norm.y - batchCropDrawing.y)),
     });
     constrainBatchCropRect();
+    propagateCropRect();
     drawBatchCropPreview();
     return;
   }
@@ -2877,6 +3019,7 @@ batchCropPreviewCanvas.addEventListener("pointermove", (event) => {
     writeCropRect({ x: left, y: top, width: right - left, height: bottom - top });
   }
   constrainBatchCropRect();
+  propagateCropRect();
   drawBatchCropPreview();
 });
 
@@ -2896,13 +3039,12 @@ batchCropPreviewCanvas.addEventListener("pointerup", endBatchCropInteraction);
 batchCropPreviewCanvas.addEventListener("pointercancel", endBatchCropInteraction);
 
 function syncBatchCropControls() {
-  const selectedCount = selectedBatchCropSources().length;
-  const ready = selectedCount > 0;
+  const ready = batchCropSources.length > 0;
   batchCropRunBtn.disabled = !ready || batchCropRunning;
   batchCropCancelBtn.disabled = !batchCropRunning || batchCropCancelRequested;
   batchCropRunBtn.textContent = batchCropRunning
     ? "처리 중..."
-    : ready ? `선택한 ${selectedCount}개 자르기` : "일괄 자르기";
+    : ready ? `${batchCropSources.length}개 자르기` : "일괄 자르기";
   [batchCropSourceInput, batchCropPrefix, batchCropFormat].forEach((control) => {
     if (control) control.disabled = batchCropRunning;
   });
@@ -2978,7 +3120,7 @@ function clearBatchCropResultsAll() {
 }
 
 async function runBatchCrop() {
-  const targets = selectedBatchCropSources();
+  const targets = batchCropSources;
   if (batchCropRunning || !targets.length) return;
   batchCropRunning = true;
   batchCropCancelRequested = false;
@@ -3082,16 +3224,12 @@ batchCropSourceInput.addEventListener("change", (event) => {
   event.target.value = "";
 });
 wireBatchDropzone(batchCropSourceDropzone, addBatchCropSources);
-batchCropRatioSeg.querySelectorAll(".seg-btn").forEach((button) => {
-  button.addEventListener("click", () => {
-    batchCropRatioSeg.querySelectorAll(".seg-btn").forEach((btn) => btn.classList.toggle("is-active", btn === button));
-    constrainBatchCropRect();
-    drawBatchCropPreview();
-  });
-});
+if (batchCropWInput) batchCropWInput.addEventListener("change", applyBatchCropSize);
+if (batchCropHInput) batchCropHInput.addEventListener("change", applyBatchCropSize);
 if (batchCropFromCenter) {
   batchCropFromCenter.addEventListener("change", () => {
     constrainBatchCropRect();
+    propagateCropRect();
     drawBatchCropPreview();
   });
 }
@@ -3106,7 +3244,12 @@ if (batchCropSelectAll) {
     if (batchCropRunning || !batchCropSources.length) return;
     const turnOn = !batchCropSources.every((source) => source.selected);
     batchCropSources.forEach((source) => (source.selected = turnOn));
+    if (turnOn) {
+      const ref = batchCropSources[batchCropSelected] || batchCropSources[0];
+      batchCropSources.forEach((source) => (source.rect = { ...ref.rect }));
+    }
     renderBatchCropSources();
+    drawBatchCropPreview();
     syncBatchCropControls();
   });
 }
