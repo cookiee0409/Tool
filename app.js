@@ -47,6 +47,7 @@ const zoomLabel = document.getElementById("zoomLabel");
 const navItems = document.querySelectorAll(".nav-item");
 const views = {
   edit: document.getElementById("view-edit"),
+  batchcrop: document.getElementById("view-batchcrop"),
   batch: document.getElementById("view-batch"),
   rename: document.getElementById("view-rename"),
   works: document.getElementById("view-works"),
@@ -143,6 +144,14 @@ let panStartY = 0;
 let spaceHeld = false;
 let exportMode = "native";
 let ratioLocked = false;
+let guideMode = "none";
+
+// Undo / redo history of the editor state (crop + shape + image transform).
+let sourceImageId = 0;
+let imageIdCounter = 0;
+let history = [];
+let historyIndex = -1;
+let restoringHistory = false;
 
 const MIN_CROP_SIZE = 20;
 const HANDLE_HIT_RADIUS = 12;
@@ -162,7 +171,12 @@ const crop = {
   y: 0,
   width: 1080,
   height: 1920,
+  angle: 0,
 };
+
+let isRotatingShape = false;
+let rotateStartAngle = 0;
+let rotatePointerStart = 0;
 
 function setStatus(message) {
   statusPill.textContent = message;
@@ -344,6 +358,10 @@ function drawStage() {
   ctx.fillRect(displayOffsetX, displayOffsetY, displayWidth, displayHeight);
   ctx.drawImage(sourceImage, displayOffsetX, displayOffsetY, displayWidth, displayHeight);
 
+  // Guides are pinned to the canvas viewport, not the image, so they stay put
+  // while the image is panned or zoomed.
+  drawGuides(0, 0, size.width, size.height);
+
   if (activeShape === "freeform") {
     drawFreeformPreview();
     return;
@@ -352,14 +370,23 @@ function drawStage() {
   if (!cropActive && !isDrawingShape) return;
 
   const rect = cropToDisplayRect();
+  const centerX = rect.x + rect.width / 2;
+  const centerY = rect.y + rect.height / 2;
   ctx.save();
   ctx.fillStyle = "rgba(45, 212, 191, 0.18)";
   ctx.strokeStyle = "#2dd4bf";
   ctx.lineWidth = 2;
   ctx.setLineDash([9, 7]);
+  ctx.save();
+  if (crop.angle) {
+    ctx.translate(centerX, centerY);
+    ctx.rotate(crop.angle);
+    ctx.translate(-centerX, -centerY);
+  }
   applyShapePath(ctx, activeShape, rect.x, rect.y, rect.width, rect.height);
   ctx.fill();
   ctx.stroke();
+  ctx.restore();
   ctx.setLineDash([]);
   ctx.strokeStyle = "rgba(255, 255, 255, 0.45)";
   ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
@@ -409,6 +436,54 @@ function drawFreeformPreview() {
   ctx.setLineDash([8, 6]);
   ctx.fill();
   ctx.stroke();
+  ctx.restore();
+}
+
+function drawGuides(x, y, width, height) {
+  if (guideMode === "none" || width < 4 || height < 4) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, width, height);
+  ctx.clip();
+  ctx.lineWidth = 1;
+
+  const drawVerticals = (fractions) => fractions.forEach((f) => {
+    const lineX = Math.round(x + width * f) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(lineX, y);
+    ctx.lineTo(lineX, y + height);
+    ctx.stroke();
+  });
+  const drawHorizontals = (fractions) => fractions.forEach((f) => {
+    const lineY = Math.round(y + height * f) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x, lineY);
+    ctx.lineTo(x + width, lineY);
+    ctx.stroke();
+  });
+
+  if (guideMode === "center") {
+    ctx.strokeStyle = "rgba(226, 74, 153, 0.7)";
+    drawVerticals([0.5]);
+    drawHorizontals([0.5]);
+  } else if (guideMode === "thirds") {
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+    drawVerticals([1 / 3, 2 / 3]);
+    drawHorizontals([1 / 3, 2 / 3]);
+    ctx.strokeStyle = "rgba(31, 35, 48, 0.35)";
+    ctx.setLineDash([4, 4]);
+    drawVerticals([1 / 3, 2 / 3]);
+    drawHorizontals([1 / 3, 2 / 3]);
+    ctx.setLineDash([]);
+  } else if (guideMode === "grid") {
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.55)";
+    const cols = [1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6];
+    drawVerticals(cols);
+    drawHorizontals(cols);
+    ctx.strokeStyle = "rgba(31, 35, 48, 0.28)";
+    drawVerticals([0.5]);
+    drawHorizontals([0.5]);
+  }
   ctx.restore();
 }
 
@@ -465,20 +540,48 @@ function setCropSize(width, height) {
   crop.height = nextHeight;
   crop.x = Math.round(centerX - nextWidth / 2);
   crop.y = Math.round(centerY - nextHeight / 2);
+  crop.angle = 0;
   cropActive = true;
   syncControls();
   drawStage();
 }
 
-function updateDrawBounds(currentPoint) {
+function updateDrawBounds(currentPoint, square) {
   const point = clampPointToImage(currentPoint);
-  crop.x = Math.min(drawOriginX, point.x);
-  crop.y = Math.min(drawOriginY, point.y);
-  crop.width = Math.max(1, Math.abs(point.x - drawOriginX));
-  crop.height = Math.max(1, Math.abs(point.y - drawOriginY));
+  let w = Math.abs(point.x - drawOriginX);
+  let h = Math.abs(point.y - drawOriginY);
+  if (square) {
+    const s = Math.max(w, h);
+    w = s;
+    h = s;
+  }
+  crop.x = point.x < drawOriginX ? drawOriginX - w : drawOriginX;
+  crop.y = point.y < drawOriginY ? drawOriginY - h : drawOriginY;
+  if (sourceImage) {
+    crop.x = Math.max(0, Math.min(crop.x, sourceImage.naturalWidth - 1));
+    crop.y = Math.max(0, Math.min(crop.y, sourceImage.naturalHeight - 1));
+    w = Math.min(w, sourceImage.naturalWidth - crop.x);
+    h = Math.min(h, sourceImage.naturalHeight - crop.y);
+    if (square) {
+      const s = Math.min(w, h);
+      w = s;
+      h = s;
+    }
+  }
+  crop.width = Math.max(1, w);
+  crop.height = Math.max(1, h);
   cropWidthInput.value = Math.round(crop.width);
   cropHeightInput.value = Math.round(crop.height);
   cutterMeta.textContent = `${Math.round(crop.width)} x ${Math.round(crop.height)}`;
+}
+
+function cropCenterClient() {
+  const canvasRect = stageCanvas.getBoundingClientRect();
+  const rect = cropToDisplayRect();
+  return {
+    x: canvasRect.left + rect.x + rect.width / 2,
+    y: canvasRect.top + rect.y + rect.height / 2,
+  };
 }
 
 function hitHandle(clientX, clientY) {
@@ -606,18 +709,22 @@ function loadFile(file) {
   const image = new Image();
   image.onload = () => {
     sourceImage = image;
+    sourceImageId = nextImageId();
     fileName.textContent = file.name;
     imageMeta.textContent = `${image.naturalWidth} x ${image.naturalHeight}px`;
     stageEmpty.classList.add("is-hidden");
     if (stageHint) stageHint.classList.remove("is-hidden");
     stampBtn.disabled = false;
     clearBtn.disabled = false;
+    setTransformButtonsEnabled(true);
     freeformPoints = [];
     cropActive = false;
     isDrawingShape = false;
     pendingDraw = false;
+    crop.angle = 0;
     resizeCanvasToStage();
     syncControls();
+    resetHistory();
     setStatus("도형을 골라 이미지 위에서 드래그해 그리세요");
   };
   image.onerror = () => setStatus("이미지를 읽지 못했어요");
@@ -634,9 +741,11 @@ function resetResults() {
   setStatus("모든 파일을 비웠어요");
 }
 
-async function canvasToBlob(canvas, mimeType) {
+async function canvasToBlob(canvas, mimeType, quality) {
+  const fallback = mimeType === "image/jpeg" ? 0.94 : 0.98;
+  const q = typeof quality === "number" ? quality : fallback;
   return new Promise((resolve) => {
-    canvas.toBlob((blob) => resolve(blob), mimeType, mimeType === "image/jpeg" ? 0.94 : 0.98);
+    canvas.toBlob((blob) => resolve(blob), mimeType, q);
   });
 }
 
@@ -670,10 +779,23 @@ async function stampCrop() {
   outputCtx.save();
   if (activeShape === "freeform") {
     applyFreeformOutputPath(outputCtx, bounds);
+    outputCtx.clip();
   } else {
+    const ocx = output.width / 2;
+    const ocy = output.height / 2;
+    if (crop.angle) {
+      outputCtx.translate(ocx, ocy);
+      outputCtx.rotate(crop.angle);
+      outputCtx.translate(-ocx, -ocy);
+    }
     applyShapePath(outputCtx, activeShape, 0, 0, output.width, output.height);
+    outputCtx.clip();
+    if (crop.angle) {
+      outputCtx.translate(ocx, ocy);
+      outputCtx.rotate(-crop.angle);
+      outputCtx.translate(-ocx, -ocy);
+    }
   }
-  outputCtx.clip();
   outputCtx.drawImage(
     sourceImage,
     Math.round(bounds.x),
@@ -1020,6 +1142,7 @@ document.querySelectorAll(".size-preset").forEach((button) => {
     cropWidthInput.value = width;
     cropHeightInput.value = height;
     setCropSize(width, height);
+    commitHistory();
     closeShapePopup();
     if (sourceImage) setStatus(`${width} x ${height} 영역을 가운데에 배치했습니다`);
   });
@@ -1043,6 +1166,7 @@ function selectShape(shape) {
   }
   syncControls();
   drawStage();
+  commitHistory();
 }
 
 function openShapePopup() {
@@ -1092,6 +1216,7 @@ function onSizeInput(which) {
     else height = Math.round(width / ratio);
   }
   setCropSize(width, height);
+  commitHistory();
 }
 
 cropWidthInput.addEventListener("change", () => onSizeInput("width"));
@@ -1108,6 +1233,8 @@ function nudgeCrop(dx, dy) {
   if (!sourceImage) return;
   if (activeShape === "freeform" && freeformPoints.length) moveFreeformBy(dx, dy);
   else if (cropActive) moveCropTo(crop.x + dx, crop.y + dy);
+  else return;
+  commitHistory();
 }
 
 stageCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
@@ -1129,6 +1256,17 @@ stageCanvas.addEventListener("pointerdown", (event) => {
   }
 
   if (event.button !== 0) return;
+
+  // Alt + drag rotates the current shape around its center.
+  if (event.altKey && cropActive && activeShape !== "freeform") {
+    isRotatingShape = true;
+    const center = cropCenterClient();
+    rotatePointerStart = Math.atan2(event.clientY - center.y, event.clientX - center.x);
+    rotateStartAngle = crop.angle;
+    stageCanvas.setPointerCapture(event.pointerId);
+    setStatus("도형을 회전하는 중 (Shift: 15° 단위)");
+    return;
+  }
 
   const imagePoint = clampPointToImage(displayPointToImage(event.clientX, event.clientY));
 
@@ -1162,6 +1300,7 @@ stageCanvas.addEventListener("pointerdown", (event) => {
   pendingDraw = true;
   drawOriginX = imagePoint.x;
   drawOriginY = imagePoint.y;
+  crop.angle = 0;
   stageCanvas.setPointerCapture(event.pointerId);
 });
 
@@ -1177,6 +1316,18 @@ stageCanvas.addEventListener("pointermove", (event) => {
     panStartX = event.clientX;
     panStartY = event.clientY;
     clampPan();
+    drawStage();
+    return;
+  }
+
+  if (isRotatingShape) {
+    const center = cropCenterClient();
+    let angle = rotateStartAngle + (Math.atan2(event.clientY - center.y, event.clientX - center.x) - rotatePointerStart);
+    if (event.shiftKey) {
+      const step = Math.PI / 12;
+      angle = Math.round(angle / step) * step;
+    }
+    crop.angle = angle;
     drawStage();
     return;
   }
@@ -1203,7 +1354,7 @@ stageCanvas.addEventListener("pointermove", (event) => {
   }
 
   if (isDrawingShape) {
-    updateDrawBounds(displayPointToImage(event.clientX, event.clientY));
+    updateDrawBounds(displayPointToImage(event.clientX, event.clientY), event.shiftKey);
     drawStage();
     return;
   }
@@ -1227,11 +1378,22 @@ stageCanvas.addEventListener("pointerup", (event) => {
     return;
   }
 
+  if (isRotatingShape) {
+    isRotatingShape = false;
+    stageCanvas.releasePointerCapture(event.pointerId);
+    syncControls();
+    commitHistory();
+    const degrees = ((Math.round((crop.angle * 180) / Math.PI) % 360) + 360) % 360;
+    setStatus(`도형을 ${degrees}° 회전했어요`);
+    return;
+  }
+
   if (isResizing) {
     isResizing = false;
     activeHandle = null;
     stageCanvas.releasePointerCapture(event.pointerId);
     syncControls();
+    commitHistory();
     setStatus(`커터 크기 ${Math.round(crop.width)} x ${Math.round(crop.height)}`);
     updateHoverCursor(event.clientX, event.clientY);
     return;
@@ -1243,6 +1405,7 @@ stageCanvas.addEventListener("pointerup", (event) => {
     if (freeformPoints.length > 2) {
       syncCropFromFreeform();
       cropActive = true;
+      commitHistory();
       setStatus("자유형 영역이 준비됐습니다");
     } else {
       freeformPoints = [];
@@ -1262,6 +1425,7 @@ stageCanvas.addEventListener("pointerup", (event) => {
       drawStage();
     } else {
       syncControls();
+      commitHistory();
       setStatus(`${shapeLabels[activeShape]} ${Math.round(crop.width)} x ${Math.round(crop.height)} 영역 완성`);
       drawStage();
       updateHoverCursor(event.clientX, event.clientY);
@@ -1273,6 +1437,7 @@ stageCanvas.addEventListener("pointerup", (event) => {
     isDragging = false;
     stageCanvas.releasePointerCapture(event.pointerId);
     if (!pointerMoved && stampOnClick.checked) stampCrop();
+    else if (pointerMoved) commitHistory();
     return;
   }
 
@@ -1282,6 +1447,17 @@ stageCanvas.addEventListener("pointerup", (event) => {
       stageCanvas.releasePointerCapture(event.pointerId);
     } catch (error) {
       /* pointer already released */
+    }
+    // A single click on empty space cancels the current selection.
+    if (!pointerMoved && (cropActive || freeformPoints.length)) {
+      cropActive = false;
+      isDrawingShape = false;
+      freeformPoints = [];
+      crop.angle = 0;
+      syncControls();
+      drawStage();
+      commitHistory();
+      setStatus("선택을 취소했어요");
     }
   }
 });
@@ -1351,17 +1527,21 @@ document.addEventListener("keydown", (event) => {
 /* ============================================================
    Works badge + export resolution
    ============================================================ */
+function worksTotalCount() {
+  return generatedCrops.length + batchCropResults.length + batchResults.length + renameEntries.length;
+}
+
 function updateWorksBadge() {
   if (!navWorksCount) return;
-  const count = generatedCrops.length + batchResults.length + renameEntries.length;
+  const count = worksTotalCount();
   navWorksCount.textContent = String(count);
   navWorksCount.hidden = count === 0;
 }
 
 function updateWorksSummary() {
   if (!worksHint) return;
-  const count = generatedCrops.length + batchResults.length + renameEntries.length;
-  worksHint.textContent = count ? `세 가지 도구에서 만든 작업 ${count}개` : "지금까지 만든 파일이 여기에 모여요";
+  const count = worksTotalCount();
+  worksHint.textContent = count ? `여러 도구에서 만든 작업 ${count}개` : "지금까지 만든 파일이 여기에 모여요";
 }
 
 function getExportSize(width, height) {
@@ -1438,11 +1618,262 @@ document.querySelectorAll(".seg-btn[data-export]").forEach((button) => {
 });
 
 /* ============================================================
+   Guides, image transforms (rotate / flip), undo / redo
+   ============================================================ */
+const undoBtn = document.getElementById("undoBtn");
+const redoBtn = document.getElementById("redoBtn");
+const rotateLeftBtn = document.getElementById("rotateLeftBtn");
+const rotateRightBtn = document.getElementById("rotateRightBtn");
+const flipHBtn = document.getElementById("flipHBtn");
+const flipVBtn = document.getElementById("flipVBtn");
+const transformButtons = [rotateLeftBtn, rotateRightBtn, flipHBtn, flipVBtn];
+
+function setGuideMode(mode) {
+  guideMode = mode;
+  document.querySelectorAll("#guideSeg .seg-btn").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.guide === mode);
+  });
+  drawStage();
+}
+
+document.querySelectorAll("#guideSeg .seg-btn").forEach((button) => {
+  button.addEventListener("click", () => setGuideMode(button.dataset.guide));
+});
+
+function nextImageId() {
+  imageIdCounter += 1;
+  return imageIdCounter;
+}
+
+function setTransformButtonsEnabled(enabled) {
+  transformButtons.forEach((button) => button && (button.disabled = !enabled));
+}
+
+function serializeState() {
+  return JSON.stringify({
+    img: sourceImageId,
+    shape: activeShape,
+    active: cropActive,
+    crop: { x: Math.round(crop.x), y: Math.round(crop.y), w: Math.round(crop.width), h: Math.round(crop.height) },
+    angle: Math.round((crop.angle || 0) * 1000),
+    free: freeformPoints.map((point) => [Math.round(point.x), Math.round(point.y)]),
+  });
+}
+
+function makeSnapshot() {
+  return {
+    image: sourceImage,
+    imageId: sourceImageId,
+    fileLabel: fileName.textContent,
+    metaLabel: imageMeta.textContent,
+    shape: activeShape,
+    cropActive,
+    crop: { ...crop },
+    freeform: freeformPoints.map((point) => ({ ...point })),
+    key: serializeState(),
+  };
+}
+
+function updateHistoryButtons() {
+  if (undoBtn) undoBtn.disabled = historyIndex <= 0;
+  if (redoBtn) redoBtn.disabled = historyIndex >= history.length - 1;
+}
+
+function commitHistory() {
+  if (restoringHistory || !sourceImage) return;
+  const snap = makeSnapshot();
+  if (historyIndex >= 0 && history[historyIndex].key === snap.key) return;
+  history = history.slice(0, historyIndex + 1);
+  history.push(snap);
+  if (history.length > 40) history.shift();
+  historyIndex = history.length - 1;
+  updateHistoryButtons();
+}
+
+function resetHistory() {
+  history = [];
+  historyIndex = -1;
+  commitHistory();
+}
+
+function applySnapshot(snap) {
+  restoringHistory = true;
+  const imageChanged = snap.imageId !== sourceImageId;
+  sourceImage = snap.image;
+  sourceImageId = snap.imageId;
+  fileName.textContent = snap.fileLabel;
+  imageMeta.textContent = snap.metaLabel;
+  activeShape = snap.shape;
+  cropActive = snap.cropActive;
+  crop.x = snap.crop.x;
+  crop.y = snap.crop.y;
+  crop.width = snap.crop.width;
+  crop.height = snap.crop.height;
+  crop.angle = snap.crop.angle || 0;
+  freeformPoints = snap.freeform.map((point) => ({ ...point }));
+  cropWidthInput.value = Math.round(crop.width);
+  cropHeightInput.value = Math.round(crop.height);
+  if (imageChanged) fitImageToStage();
+  syncControls();
+  updateZoomLabel();
+  drawStage();
+  restoringHistory = false;
+}
+
+function undo() {
+  if (historyIndex <= 0) return;
+  historyIndex -= 1;
+  applySnapshot(history[historyIndex]);
+  updateHistoryButtons();
+  setStatus("실행 취소");
+}
+
+function redo() {
+  if (historyIndex >= history.length - 1) return;
+  historyIndex += 1;
+  applySnapshot(history[historyIndex]);
+  updateHistoryButtons();
+  setStatus("다시 실행");
+}
+
+const TRANSFORM_LABELS = {
+  left: "왼쪽으로 90° 회전했어요",
+  right: "오른쪽으로 90° 회전했어요",
+  flipH: "좌우로 반전했어요",
+  flipV: "상하로 반전했어요",
+};
+
+function transformSource(kind) {
+  if (!sourceImage) return;
+  const w = sourceImage.naturalWidth;
+  const h = sourceImage.naturalHeight;
+  const canvas = document.createElement("canvas");
+  const c = canvas.getContext("2d");
+  const rotate = kind === "left" || kind === "right";
+  canvas.width = rotate ? h : w;
+  canvas.height = rotate ? w : h;
+  c.save();
+  if (kind === "right") {
+    c.translate(h, 0);
+    c.rotate(Math.PI / 2);
+  } else if (kind === "left") {
+    c.translate(0, w);
+    c.rotate(-Math.PI / 2);
+  } else if (kind === "flipH") {
+    c.translate(w, 0);
+    c.scale(-1, 1);
+  } else if (kind === "flipV") {
+    c.translate(0, h);
+    c.scale(1, -1);
+  }
+  c.drawImage(sourceImage, 0, 0);
+  c.restore();
+
+  const newImage = new Image();
+  newImage.onload = () => {
+    sourceImage = newImage;
+    sourceImageId = nextImageId();
+    imageMeta.textContent = `${newImage.naturalWidth} x ${newImage.naturalHeight}px`;
+    cropActive = false;
+    isDrawingShape = false;
+    pendingDraw = false;
+    freeformPoints = [];
+    crop.angle = 0;
+    fitImageToStage();
+    syncControls();
+    updateZoomLabel();
+    drawStage();
+    commitHistory();
+    setStatus(TRANSFORM_LABELS[kind] || "이미지를 변형했어요");
+  };
+  newImage.src = canvas.toDataURL("image/png");
+}
+
+if (undoBtn) undoBtn.addEventListener("click", undo);
+if (redoBtn) redoBtn.addEventListener("click", redo);
+if (rotateLeftBtn) rotateLeftBtn.addEventListener("click", () => transformSource("left"));
+if (rotateRightBtn) rotateRightBtn.addEventListener("click", () => transformSource("right"));
+if (flipHBtn) flipHBtn.addEventListener("click", () => transformSource("flipH"));
+if (flipVBtn) flipVBtn.addEventListener("click", () => transformSource("flipV"));
+
+document.addEventListener("keydown", (event) => {
+  if (isTypingTarget(event.target)) return;
+  if (!(event.ctrlKey || event.metaKey)) return;
+  const key = event.key.toLowerCase();
+  if (key === "z" && !event.shiftKey) {
+    undo();
+    event.preventDefault();
+  } else if ((key === "z" && event.shiftKey) || key === "y") {
+    redo();
+    event.preventDefault();
+  }
+});
+
+/* ============================================================
    Batch paste
    ============================================================ */
 function setBatchStatus(message) {
   if (batchStatus) batchStatus.textContent = message;
 }
+
+const batchSelectAll = document.getElementById("batchSelectAll");
+const pastePosX = document.getElementById("pastePosX");
+const pastePosY = document.getElementById("pastePosY");
+
+// Shared "저장 해상도" (export resolution) control used by the batch tools.
+function computeExportDimensions(baseW, baseH, mode, scaleValue, customW, customH) {
+  const bw = Math.max(1, Math.round(baseW));
+  const bh = Math.max(1, Math.round(baseH));
+  if (mode === "scale") {
+    const percent = clampNumber(scaleValue, 1, 1000, 100) / 100;
+    return { width: Math.max(1, Math.round(bw * percent)), height: Math.max(1, Math.round(bh * percent)) };
+  }
+  if (mode === "custom") {
+    return {
+      width: Math.max(1, Math.round(clampNumber(customW, 1, 20000, bw))),
+      height: Math.max(1, Math.round(clampNumber(customH, 1, 20000, bh))),
+    };
+  }
+  return { width: bw, height: bh };
+}
+
+function setupBatchExport(prefix) {
+  const seg = document.getElementById(`${prefix}ExportSeg`);
+  const scaleField = document.getElementById(`${prefix}ScaleField`);
+  const customField = document.getElementById(`${prefix}CustomField`);
+  const scaleInput = document.getElementById(`${prefix}ExportScale`);
+  const widthInput = document.getElementById(`${prefix}ExportWidth`);
+  const heightInput = document.getElementById(`${prefix}ExportHeight`);
+  const state = { mode: "native" };
+  function setMode(mode) {
+    state.mode = mode;
+    seg.querySelectorAll(".seg-btn").forEach((button) => {
+      button.classList.toggle("is-active", button.dataset.bexport === mode);
+    });
+    if (scaleField) scaleField.hidden = mode !== "scale";
+    if (customField) customField.hidden = mode !== "custom";
+  }
+  if (seg) {
+    seg.querySelectorAll(".seg-btn").forEach((button) => {
+      button.addEventListener("click", () => setMode(button.dataset.bexport));
+    });
+    setMode("native");
+  }
+  return {
+    size(baseW, baseH) {
+      return computeExportDimensions(
+        baseW,
+        baseH,
+        state.mode,
+        scaleInput ? scaleInput.value : 100,
+        widthInput ? widthInput.value : baseW,
+        heightInput ? heightInput.value : baseH
+      );
+    },
+  };
+}
+
+const bpasteExport = setupBatchExport("bpaste");
 
 function loadBatchImage(file) {
   return new Promise((resolve, reject) => {
@@ -1477,7 +1908,13 @@ async function addBatchSources(files) {
   setBatchStatus(`${selected.length}개 이미지를 불러오는 중`);
   const loaded = await Promise.allSettled(selected.map(loadBatchImage));
   loaded.forEach((result) => {
-    if (result.status === "fulfilled") batchSources.push(result.value);
+    if (result.status === "fulfilled") {
+      const src = result.value;
+      src.transform = { x: 0.77, y: 0.77, width: 0.2 };
+      src.selected = true;
+      if (batchOverlay) resetBatchOverlayTransformFor(src);
+      batchSources.push(src);
+    }
   });
   if (batchSelectedSource >= batchSources.length) batchSelectedSource = Math.max(0, batchSources.length - 1);
   renderBatchSources();
@@ -1502,7 +1939,7 @@ async function setBatchOverlay(file) {
     image.alt = file.name;
     batchOverlayPreview.append(image);
     batchOverlayName.textContent = file.name;
-    resetBatchOverlayTransform();
+    batchSources.forEach(resetBatchOverlayTransformFor);
     drawBatchPreview();
     syncBatchControls();
     setBatchStatus("붙여넣을 이미지 준비됨");
@@ -1511,41 +1948,149 @@ async function setBatchOverlay(file) {
   }
 }
 
-function renderBatchSources() {
-  batchSourceGrid.innerHTML = "";
+// Shared upload workspace renderer: ≤9 sources show as thumbnails,
+// 10+ switch to a paginated 2-column × 5-row list with arrow paging.
+const batchSourcePager = { page: 0 };
+const batchCropSourcePager = { page: 0 };
+
+function buildSourceItem(source, index, opts) {
+  const card = document.createElement("article");
+  card.className = `${opts.list ? "batch-list-item" : "batch-file-card"}${index === opts.selectedIndex ? " is-active" : ""}${source.selected ? " is-linked" : ""}`;
+  card.tabIndex = 0;
+  card.setAttribute("role", "button");
+  card.setAttribute("aria-label", `${source.file.name} 미리보기`);
+
+  const check = document.createElement("label");
+  check.className = "batch-file-check";
+  check.title = "같이 이동할 사진 묶기";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = Boolean(source.selected);
+  checkbox.setAttribute("aria-label", `${source.file.name} 같이 이동`);
+  checkbox.addEventListener("click", (event) => event.stopPropagation());
+  checkbox.addEventListener("change", () => opts.onToggle(index, checkbox.checked));
+  check.append(checkbox);
+
+  const image = document.createElement("img");
+  image.src = source.url;
+  image.alt = "";
+  const name = document.createElement("span");
+  name.textContent = source.file.name;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "batch-file-remove";
+  remove.textContent = "×";
+  remove.setAttribute("aria-label", `${source.file.name} 제거`);
+
+  const select = () => opts.onPreview(index);
+  card.addEventListener("click", select);
+  card.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      select();
+    }
+  });
+  remove.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (opts.running) return;
+    opts.onRemove(index);
+  });
+
+  card.append(check, image, name, remove);
+  return card;
+}
+
+function renderSourceWorkspace(opts) {
+  const { grid, sources, pageState } = opts;
+  grid.innerHTML = "";
+  const list = sources.length > 9;
+  grid.classList.toggle("is-list", list);
+
+  let pager = grid.parentElement.querySelector(`.batch-pager[data-for="${grid.id}"]`);
+  let visible = sources.map((source, index) => ({ source, index }));
+
+  if (list) {
+    const pageSize = 10;
+    const pages = Math.max(1, Math.ceil(sources.length / pageSize));
+    pageState.page = Math.min(Math.max(0, pageState.page), pages - 1);
+    visible = visible.slice(pageState.page * pageSize, pageState.page * pageSize + pageSize);
+    if (!pager) {
+      pager = document.createElement("div");
+      pager.className = "batch-pager";
+      pager.dataset.for = grid.id;
+      grid.insertAdjacentElement("afterend", pager);
+    }
+    pager.hidden = false;
+    pager.innerHTML = "";
+    const prev = document.createElement("button");
+    prev.type = "button";
+    prev.className = "pager-btn";
+    prev.textContent = "‹";
+    prev.disabled = pageState.page <= 0;
+    prev.addEventListener("click", () => {
+      pageState.page -= 1;
+      opts.rerender();
+    });
+    const label = document.createElement("span");
+    label.className = "pager-label";
+    label.textContent = `${pageState.page + 1} / ${pages}`;
+    const next = document.createElement("button");
+    next.type = "button";
+    next.className = "pager-btn";
+    next.textContent = "›";
+    next.disabled = pageState.page >= pages - 1;
+    next.addEventListener("click", () => {
+      pageState.page += 1;
+      opts.rerender();
+    });
+    pager.append(prev, label, next);
+  } else if (pager) {
+    pager.hidden = true;
+  }
+
+  visible.forEach(({ source, index }) => {
+    grid.append(buildSourceItem(source, index, opts));
+  });
+}
+
+function adoptOverlayGroup(index) {
+  const current = batchSources[batchSelectedSource];
+  const ref = current && current.selected && batchSelectedSource !== index
+    ? current
+    : batchSources.find((source, i) => i !== index && source.selected);
+  if (ref) batchSources[index].transform = { ...ref.transform };
+}
+
+function propagateOverlayTransform() {
+  const current = batchSources[batchSelectedSource];
+  if (!current || !current.selected) return;
   batchSources.forEach((source, index) => {
-    const card = document.createElement("article");
-    card.className = `batch-file-card${index === batchSelectedSource ? " is-active" : ""}`;
-    card.tabIndex = 0;
-    card.setAttribute("role", "button");
-    card.setAttribute("aria-label", `${source.file.name} 미리보기`);
+    if (index !== batchSelectedSource && source.selected) source.transform = { ...current.transform };
+  });
+}
 
-    const image = document.createElement("img");
-    image.src = source.url;
-    image.alt = "";
-    const name = document.createElement("span");
-    name.textContent = source.file.name;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "batch-file-remove";
-    remove.textContent = "×";
-    remove.setAttribute("aria-label", `${source.file.name} 제거`);
-
-    const select = () => {
+function renderBatchSources() {
+  renderSourceWorkspace({
+    grid: batchSourceGrid,
+    sources: batchSources,
+    selectedIndex: batchSelectedSource,
+    running: batchRunning,
+    pageState: batchSourcePager,
+    rerender: renderBatchSources,
+    onPreview(index) {
       batchSelectedSource = index;
       renderBatchSources();
       drawBatchPreview();
-    };
-    card.addEventListener("click", select);
-    card.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        select();
-      }
-    });
-    remove.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (batchRunning) return;
+    },
+    onToggle(index, checked) {
+      batchSources[index].selected = checked;
+      if (checked) adoptOverlayGroup(index);
+      renderBatchSources();
+      drawBatchPreview();
+      updateBatchSelectAll();
+    },
+    onRemove(index) {
+      const source = batchSources[index];
       URL.revokeObjectURL(source.url);
       batchSources.splice(index, 1);
       batchSelectedSource = Math.min(batchSelectedSource, Math.max(0, batchSources.length - 1));
@@ -1553,12 +2098,17 @@ function renderBatchSources() {
       drawBatchPreview();
       syncBatchControls();
       setBatchStatus(batchSources.length ? `${batchSources.length}개 원본 이미지 준비됨` : "원본 이미지를 업로드하세요");
-    });
-
-    card.append(image, name, remove);
-    batchSourceGrid.append(card);
+    },
   });
   batchSourceCount.textContent = `${batchSources.length}개`;
+  updateBatchSelectAll();
+}
+
+function updateBatchSelectAll() {
+  if (!batchSelectAll) return;
+  batchSelectAll.hidden = batchSources.length === 0;
+  const allOn = batchSources.length > 0 && batchSources.every((source) => source.selected);
+  batchSelectAll.textContent = allOn ? "전체 해제" : "전체 선택";
 }
 
 function getBatchOverlayRatio() {
@@ -1566,41 +2116,41 @@ function getBatchOverlayRatio() {
   return batchOverlay.image.naturalHeight / batchOverlay.image.naturalWidth;
 }
 
-function getBatchPlacement(baseWidth, baseHeight) {
+function getBatchPlacement(baseWidth, baseHeight, transform = batchOverlayTransform) {
   const ratio = getBatchOverlayRatio();
   const minWidth = Math.min(0.08, 24 / baseWidth);
   const maxWidth = Math.min(0.96, (baseHeight * 0.96) / (baseWidth * ratio));
-  const widthFraction = Math.min(maxWidth, Math.max(minWidth, batchOverlayTransform.width));
+  const widthFraction = Math.min(maxWidth, Math.max(minWidth, transform.width));
   const width = baseWidth * widthFraction;
   const height = width * ratio;
   const maxX = Math.max(0, baseWidth - width);
   const maxY = Math.max(0, baseHeight - height);
   return {
-    x: Math.min(maxX, Math.max(0, batchOverlayTransform.x * baseWidth)),
-    y: Math.min(maxY, Math.max(0, batchOverlayTransform.y * baseHeight)),
+    x: Math.min(maxX, Math.max(0, transform.x * baseWidth)),
+    y: Math.min(maxY, Math.max(0, transform.y * baseHeight)),
     width,
     height,
   };
 }
 
-function constrainBatchOverlayTransform(baseWidth, baseHeight) {
+function constrainBatchOverlayTransform(baseWidth, baseHeight, transform = batchOverlayTransform) {
   if (!batchOverlay) return;
-  const placement = getBatchPlacement(baseWidth, baseHeight);
-  batchOverlayTransform.width = placement.width / baseWidth;
-  batchOverlayTransform.x = placement.x / baseWidth;
-  batchOverlayTransform.y = placement.y / baseHeight;
+  const placement = getBatchPlacement(baseWidth, baseHeight, transform);
+  transform.width = placement.width / baseWidth;
+  transform.x = placement.x / baseWidth;
+  transform.y = placement.y / baseHeight;
 }
 
-function resetBatchOverlayTransform() {
-  const source = batchSources[batchSelectedSource];
-  batchOverlayTransform = { x: 0.77, y: 0.77, width: 0.2 };
-  if (!source || !batchOverlay) return;
+function resetBatchOverlayTransformFor(source) {
+  if (!source) return;
+  source.transform = { x: 0.77, y: 0.77, width: 0.2 };
+  if (!batchOverlay) return;
   const baseWidth = source.image.naturalWidth;
   const baseHeight = source.image.naturalHeight;
-  constrainBatchOverlayTransform(baseWidth, baseHeight);
-  const placement = getBatchPlacement(baseWidth, baseHeight);
-  batchOverlayTransform.x = Math.max(0, (baseWidth - placement.width) / baseWidth - 0.03);
-  batchOverlayTransform.y = Math.max(0, (baseHeight - placement.height) / baseHeight - 0.03);
+  constrainBatchOverlayTransform(baseWidth, baseHeight, source.transform);
+  const placement = getBatchPlacement(baseWidth, baseHeight, source.transform);
+  source.transform.x = Math.max(0, (baseWidth - placement.width) / baseWidth - 0.03);
+  source.transform.y = Math.max(0, (baseHeight - placement.height) / baseHeight - 0.03);
 }
 
 function drawBatchPreview() {
@@ -1626,8 +2176,9 @@ function drawBatchPreview() {
   context.drawImage(source.image, originX, originY, drawWidth, drawHeight);
 
   if (batchOverlay) {
-    constrainBatchOverlayTransform(baseWidth, baseHeight);
-    const placement = getBatchPlacement(baseWidth, baseHeight);
+    batchOverlayTransform = source.transform;
+    constrainBatchOverlayTransform(baseWidth, baseHeight, source.transform);
+    const placement = getBatchPlacement(baseWidth, baseHeight, source.transform);
     context.save();
     context.beginPath();
     context.rect(originX, originY, drawWidth, drawHeight);
@@ -1667,8 +2218,62 @@ function drawBatchPreview() {
       context.strokeRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
     });
     context.restore();
+
+    // Dashed crosshair through the paste center, with position percentages.
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    const xPct = Math.round(((cx - originX) / drawWidth) * 100);
+    const yPct = Math.round(((cy - originY) / drawHeight) * 100);
+    context.save();
+    context.strokeStyle = "rgba(59, 111, 224, 0.95)";
+    context.lineWidth = 1.5;
+    context.setLineDash([6, 5]);
+    context.beginPath();
+    context.moveTo(cx, originY);
+    context.lineTo(cx, originY + drawHeight);
+    context.moveTo(originX, cy);
+    context.lineTo(originX + drawWidth, cy);
+    context.stroke();
+    context.setLineDash([]);
+    context.font = "800 13px Segoe UI, sans-serif";
+    const drawLabel = (text, lx, ly, align, baseline) => {
+      context.textAlign = align;
+      context.textBaseline = baseline;
+      context.lineWidth = 3;
+      context.strokeStyle = "#ffffff";
+      context.strokeText(text, lx, ly);
+      context.fillStyle = "#3b6fe0";
+      context.fillText(text, lx, ly);
+    };
+    drawLabel(`${xPct}%`, cx, Math.min(originY + drawHeight - 8, canvasHeight - 6), "center", "alphabetic");
+    drawLabel(`${yPct}%`, Math.min(originX + drawWidth - 6, canvasWidth - 6), cy, "right", "middle");
+    context.restore();
+    updatePastePosInputs(xPct, yPct);
+
     batchPreviewFrame = { originX, originY, scale, baseWidth, baseHeight, box };
   }
+}
+
+function updatePastePosInputs(xPct, yPct) {
+  if (pastePosX && document.activeElement !== pastePosX) pastePosX.value = xPct;
+  if (pastePosY && document.activeElement !== pastePosY) pastePosY.value = yPct;
+}
+
+function applyPastePosition() {
+  const source = batchSources[batchSelectedSource];
+  if (!source || !batchOverlay) return;
+  const baseW = source.image.naturalWidth;
+  const baseH = source.image.naturalHeight;
+  const placement = getBatchPlacement(baseW, baseH, source.transform);
+  const halfW = placement.width / baseW / 2;
+  const halfH = placement.height / baseH / 2;
+  const cx = clampNumber(pastePosX.value, 0, 100, 50) / 100;
+  const cy = clampNumber(pastePosY.value, 0, 100, 50) / 100;
+  source.transform.x = cx - halfW;
+  source.transform.y = cy - halfH;
+  constrainBatchOverlayTransform(baseW, baseH, source.transform);
+  propagateOverlayTransform();
+  drawBatchPreview();
 }
 
 function getBatchPreviewPoint(event) {
@@ -1760,6 +2365,7 @@ batchPreviewCanvas.addEventListener("pointermove", (event) => {
       : interaction.original.y;
   }
   constrainBatchOverlayTransform(batchPreviewFrame.baseWidth, batchPreviewFrame.baseHeight);
+  propagateOverlayTransform();
   drawBatchPreview();
 });
 
@@ -1783,7 +2389,7 @@ function syncBatchControls() {
   batchCancelBtn.disabled = !batchRunning || batchCancelRequested;
   batchRunBtn.textContent = batchRunning
     ? "처리 중..."
-    : ready ? `${batchSources.length}개 일괄 붙여넣기` : "일괄 붙여넣기";
+    : ready ? `${batchSources.length}개 붙여넣기` : "일괄 붙여넣기";
   [batchSourceInput, batchOverlayInput, batchPrefix, batchFormat].forEach((control) => {
     control.disabled = batchRunning;
   });
@@ -1858,13 +2464,14 @@ function clearBatchResults() {
 }
 
 async function runBatchPaste() {
-  if (batchRunning || !batchSources.length || !batchOverlay) return;
+  const targets = batchSources;
+  if (batchRunning || !targets.length || !batchOverlay) return;
   batchRunning = true;
   batchCancelRequested = false;
   batchProgress.hidden = false;
-  batchProgressBar.max = batchSources.length;
+  batchProgressBar.max = targets.length;
   batchProgressBar.value = 0;
-  batchProgressText.textContent = `0 / ${batchSources.length}`;
+  batchProgressText.textContent = `0 / ${targets.length}`;
   syncBatchControls();
   renderBatchResults();
 
@@ -1875,22 +2482,33 @@ async function runBatchPaste() {
   let failed = false;
 
   try {
-    for (const source of batchSources) {
+    for (const source of targets) {
       if (batchCancelRequested) break;
       setBatchStatus(`${source.file.name} 처리 중`);
       await new Promise((resolve) => requestAnimationFrame(resolve));
 
+      const baseW = source.image.naturalWidth;
+      const baseH = source.image.naturalHeight;
+      const out = bpasteExport.size(baseW, baseH);
+      const sx = out.width / baseW;
+      const sy = out.height / baseH;
       const output = document.createElement("canvas");
-      output.width = source.image.naturalWidth;
-      output.height = source.image.naturalHeight;
+      output.width = out.width;
+      output.height = out.height;
       const context = output.getContext("2d");
       if (mimeType === "image/jpeg") {
         context.fillStyle = "#ffffff";
         context.fillRect(0, 0, output.width, output.height);
       }
-      context.drawImage(source.image, 0, 0);
-      const placement = getBatchPlacement(output.width, output.height);
-      context.drawImage(batchOverlay.image, placement.x, placement.y, placement.width, placement.height);
+      context.drawImage(source.image, 0, 0, output.width, output.height);
+      const placement = getBatchPlacement(baseW, baseH, source.transform);
+      context.drawImage(
+        batchOverlay.image,
+        placement.x * sx,
+        placement.y * sy,
+        placement.width * sx,
+        placement.height * sy
+      );
 
       const blob = await canvasToBlob(output, mimeType);
       const originalName = source.file.name.replace(/\.[^.]+$/, "");
@@ -1907,7 +2525,7 @@ async function runBatchPaste() {
       batchResults.push(item);
       completed += 1;
       batchProgressBar.value = completed;
-      batchProgressText.textContent = `${completed} / ${batchSources.length}`;
+      batchProgressText.textContent = `${completed} / ${targets.length}`;
       renderBatchResults();
       if (batchAutoDownload.checked) downloadOne(item);
     }
@@ -1983,6 +2601,658 @@ batchRunBtn.addEventListener("click", runBatchPaste);
 batchCancelBtn.addEventListener("click", cancelBatchPaste);
 batchDownloadAll.addEventListener("click", downloadBatchZip);
 batchClearResults.addEventListener("click", clearBatchResults);
+if (pastePosX) pastePosX.addEventListener("change", applyPastePosition);
+if (pastePosY) pastePosY.addEventListener("change", applyPastePosition);
+if (batchSelectAll) {
+  batchSelectAll.addEventListener("click", () => {
+    if (batchRunning || !batchSources.length) return;
+    const turnOn = !batchSources.every((source) => source.selected);
+    batchSources.forEach((source) => (source.selected = turnOn));
+    if (turnOn) {
+      const ref = batchSources[batchSelectedSource] || batchSources[0];
+      batchSources.forEach((source) => (source.transform = { ...ref.transform }));
+    }
+    renderBatchSources();
+    drawBatchPreview();
+    syncBatchControls();
+  });
+}
+
+/* ============================================================
+   Batch crop — apply one crop region to many images
+   ============================================================ */
+const batchCropStatus = document.getElementById("batchCropStatus");
+const batchCropSourceInput = document.getElementById("batchCropSourceInput");
+const batchCropSourceDropzone = document.getElementById("batchCropSourceDropzone");
+const batchCropSourceGrid = document.getElementById("batchCropSourceGrid");
+const batchCropSourceCount = document.getElementById("batchCropSourceCount");
+const batchCropWInput = document.getElementById("batchCropW");
+const batchCropHInput = document.getElementById("batchCropH");
+const batchCropFromCenter = document.getElementById("batchCropFromCenter");
+const batchCropPreviewCanvas = document.getElementById("batchCropPreviewCanvas");
+const batchCropPreviewEmpty = document.getElementById("batchCropPreviewEmpty");
+const batchCropPreviewName = document.getElementById("batchCropPreviewName");
+const batchCropRunBtn = document.getElementById("batchCropRunBtn");
+const batchCropCancelBtn = document.getElementById("batchCropCancelBtn");
+const batchCropProgress = document.getElementById("batchCropProgress");
+const batchCropProgressText = document.getElementById("batchCropProgressText");
+const batchCropProgressBar = document.getElementById("batchCropProgressBar");
+const batchCropResultCount = document.getElementById("batchCropResultCount");
+const batchCropResultHint = document.getElementById("batchCropResultHint");
+const batchCropResultEmpty = document.getElementById("batchCropResultEmpty");
+const batchCropResultGrid = document.getElementById("batchCropResultGrid");
+const batchCropDownloadAll = document.getElementById("batchCropDownloadAll");
+const batchCropClearResults = document.getElementById("batchCropClearResults");
+const batchCropPrefix = document.getElementById("batchCropPrefix");
+const batchCropFormat = document.getElementById("batchCropFormat");
+const batchCropAutoDownload = document.getElementById("batchCropAutoDownload");
+const worksBatchCropGrid = document.getElementById("worksBatchCropGrid");
+const worksBatchCropEmpty = document.getElementById("worksBatchCropEmpty");
+const worksBatchCropCount = document.getElementById("worksBatchCropCount");
+const downloadBatchCropWorks = document.getElementById("downloadBatchCropWorks");
+const clearBatchCropWorks = document.getElementById("clearBatchCropWorks");
+
+const batchCropSelectAll = document.getElementById("batchCropSelectAll");
+const bcropExport = setupBatchExport("bcrop");
+
+let batchCropSources = [];
+let batchCropSelected = 0;
+// Alias to the currently previewed source's rect (per-image crop region).
+let batchCropRect = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
+let batchCropResults = [];
+let batchCropRunning = false;
+let batchCropCancelRequested = false;
+let batchCropFrame = null;
+let batchCropInteraction = null;
+let batchCropDrawing = null;
+
+function setBatchCropStatus(message) {
+  if (batchCropStatus) batchCropStatus.textContent = message;
+}
+
+function currentBatchCropSource() {
+  return batchCropSources[batchCropSelected] || null;
+}
+
+function constrainBatchCropRect() {
+  const rect = batchCropRect;
+  rect.width = Math.min(1, Math.max(0.02, rect.width));
+  rect.height = Math.min(1, Math.max(0.02, rect.height));
+  if (batchCropFromCenter && batchCropFromCenter.checked) {
+    rect.x = (1 - rect.width) / 2;
+    rect.y = (1 - rect.height) / 2;
+  }
+  rect.x = Math.min(Math.max(0, rect.x), 1 - rect.width);
+  rect.y = Math.min(Math.max(0, rect.y), 1 - rect.height);
+}
+
+function pointCropRectToCurrent() {
+  const source = currentBatchCropSource();
+  if (source) batchCropRect = source.rect;
+}
+
+function adoptCropGroup(index) {
+  const current = batchCropSources[batchCropSelected];
+  const ref = current && current.selected && batchCropSelected !== index
+    ? current
+    : batchCropSources.find((source, i) => i !== index && source.selected);
+  if (ref) batchCropSources[index].rect = { ...ref.rect };
+}
+
+function propagateCropRect() {
+  const current = batchCropSources[batchCropSelected];
+  if (!current || !current.selected) return;
+  batchCropSources.forEach((source, index) => {
+    if (index !== batchCropSelected && source.selected) source.rect = { ...current.rect };
+  });
+}
+
+function updateBatchCropSizeInputs() {
+  const source = currentBatchCropSource();
+  if (!source) return;
+  if (batchCropWInput && document.activeElement !== batchCropWInput) {
+    batchCropWInput.value = Math.round(source.rect.width * source.image.naturalWidth);
+  }
+  if (batchCropHInput && document.activeElement !== batchCropHInput) {
+    batchCropHInput.value = Math.round(source.rect.height * source.image.naturalHeight);
+  }
+}
+
+function applyBatchCropSize() {
+  const source = currentBatchCropSource();
+  if (!source) return;
+  const baseW = source.image.naturalWidth;
+  const baseH = source.image.naturalHeight;
+  const rect = source.rect;
+  const centerX = rect.x + rect.width / 2;
+  const centerY = rect.y + rect.height / 2;
+  const pw = clampNumber(batchCropWInput.value, 1, baseW, Math.round(rect.width * baseW));
+  const ph = clampNumber(batchCropHInput.value, 1, baseH, Math.round(rect.height * baseH));
+  rect.width = pw / baseW;
+  rect.height = ph / baseH;
+  rect.x = centerX - rect.width / 2;
+  rect.y = centerY - rect.height / 2;
+  batchCropRect = rect;
+  constrainBatchCropRect();
+  propagateCropRect();
+  drawBatchCropPreview();
+}
+
+// Write a new rect into the currently previewed source so it stays per-image.
+function writeCropRect(next) {
+  const source = currentBatchCropSource();
+  const target = source ? source.rect : batchCropRect;
+  target.x = next.x;
+  target.y = next.y;
+  target.width = next.width;
+  target.height = next.height;
+  batchCropRect = target;
+}
+
+async function addBatchCropSources(files) {
+  if (batchCropRunning) return;
+  const available = Math.max(0, 50 - batchCropSources.length);
+  const selected = Array.from(files || []).filter((file) => file.type.startsWith("image/")).slice(0, available);
+  if (!selected.length) {
+    setBatchCropStatus(available ? "사용할 수 있는 이미지 파일이 없어요" : "원본 이미지는 최대 50개까지 추가할 수 있어요");
+    return;
+  }
+  setBatchCropStatus(`${selected.length}개 이미지를 불러오는 중`);
+  const loaded = await Promise.allSettled(selected.map(loadBatchImage));
+  loaded.forEach((result) => {
+    if (result.status === "fulfilled") {
+      const src = result.value;
+      src.rect = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
+      src.selected = true;
+      batchCropSources.push(src);
+    }
+  });
+  if (batchCropSelected >= batchCropSources.length) batchCropSelected = Math.max(0, batchCropSources.length - 1);
+  pointCropRectToCurrent();
+  constrainBatchCropRect();
+  renderBatchCropSources();
+  drawBatchCropPreview();
+  syncBatchCropControls();
+  setBatchCropStatus(`${batchCropSources.length}개 원본 이미지 준비됨`);
+}
+
+function updateBatchCropSelectAll() {
+  if (!batchCropSelectAll) return;
+  batchCropSelectAll.hidden = batchCropSources.length === 0;
+  const allOn = batchCropSources.length > 0 && batchCropSources.every((source) => source.selected);
+  batchCropSelectAll.textContent = allOn ? "전체 해제" : "전체 선택";
+}
+
+function renderBatchCropSources() {
+  renderSourceWorkspace({
+    grid: batchCropSourceGrid,
+    sources: batchCropSources,
+    selectedIndex: batchCropSelected,
+    running: batchCropRunning,
+    pageState: batchCropSourcePager,
+    rerender: renderBatchCropSources,
+    onPreview(index) {
+      batchCropSelected = index;
+      pointCropRectToCurrent();
+      constrainBatchCropRect();
+      renderBatchCropSources();
+      drawBatchCropPreview();
+    },
+    onToggle(index, checked) {
+      batchCropSources[index].selected = checked;
+      if (checked) adoptCropGroup(index);
+      renderBatchCropSources();
+      drawBatchCropPreview();
+      updateBatchCropSelectAll();
+    },
+    onRemove(index) {
+      const source = batchCropSources[index];
+      URL.revokeObjectURL(source.url);
+      batchCropSources.splice(index, 1);
+      batchCropSelected = Math.min(batchCropSelected, Math.max(0, batchCropSources.length - 1));
+      pointCropRectToCurrent();
+      renderBatchCropSources();
+      drawBatchCropPreview();
+      syncBatchCropControls();
+      setBatchCropStatus(batchCropSources.length ? `${batchCropSources.length}개 원본 이미지 준비됨` : "원본 이미지를 업로드하세요");
+    },
+  });
+  batchCropSourceCount.textContent = `${batchCropSources.length}개`;
+  updateBatchCropSelectAll();
+}
+
+function drawBatchCropPreview() {
+  const context = batchCropPreviewCanvas.getContext("2d");
+  const canvasWidth = batchCropPreviewCanvas.width;
+  const canvasHeight = batchCropPreviewCanvas.height;
+  context.clearRect(0, 0, canvasWidth, canvasHeight);
+  batchCropFrame = null;
+  const source = currentBatchCropSource();
+  batchCropPreviewName.textContent = source ? source.file.name : "선택된 원본 없음";
+  batchCropPreviewEmpty.classList.toggle("is-hidden", Boolean(source));
+  if (!source) return;
+  batchCropRect = source.rect;
+
+  const baseWidth = source.image.naturalWidth;
+  const baseHeight = source.image.naturalHeight;
+  const scale = Math.min(canvasWidth / baseWidth, canvasHeight / baseHeight);
+  const drawWidth = baseWidth * scale;
+  const drawHeight = baseHeight * scale;
+  const originX = (canvasWidth - drawWidth) / 2;
+  const originY = (canvasHeight - drawHeight) / 2;
+  context.fillStyle = "#ffffff";
+  context.fillRect(originX, originY, drawWidth, drawHeight);
+  context.drawImage(source.image, originX, originY, drawWidth, drawHeight);
+
+  constrainBatchCropRect();
+  updateBatchCropSizeInputs();
+  const box = {
+    x: originX + batchCropRect.x * drawWidth,
+    y: originY + batchCropRect.y * drawHeight,
+    width: batchCropRect.width * drawWidth,
+    height: batchCropRect.height * drawHeight,
+  };
+
+  // Dim the area outside the crop box.
+  context.save();
+  context.fillStyle = "rgba(20, 22, 34, 0.45)";
+  context.beginPath();
+  context.rect(originX, originY, drawWidth, drawHeight);
+  context.rect(box.x, box.y, box.width, box.height);
+  context.fill("evenodd");
+  context.restore();
+
+  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#e24a99";
+  context.save();
+  context.strokeStyle = accent;
+  context.lineWidth = 2;
+  context.setLineDash([7, 4]);
+  context.strokeRect(box.x, box.y, box.width, box.height);
+  context.setLineDash([]);
+  // Rule-of-thirds inside the crop box.
+  context.strokeStyle = "rgba(255, 255, 255, 0.6)";
+  context.lineWidth = 1;
+  [1 / 3, 2 / 3].forEach((f) => {
+    context.beginPath();
+    context.moveTo(box.x + box.width * f, box.y);
+    context.lineTo(box.x + box.width * f, box.y + box.height);
+    context.stroke();
+    context.beginPath();
+    context.moveTo(box.x, box.y + box.height * f);
+    context.lineTo(box.x + box.width, box.y + box.height * f);
+    context.stroke();
+  });
+  const handleSize = 10;
+  [
+    [box.x, box.y],
+    [box.x + box.width, box.y],
+    [box.x, box.y + box.height],
+    [box.x + box.width, box.y + box.height],
+  ].forEach(([x, y]) => {
+    context.fillStyle = "#ffffff";
+    context.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+    context.strokeStyle = accent;
+    context.lineWidth = 2;
+    context.strokeRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+  });
+  context.restore();
+
+  const pxW = Math.round(batchCropRect.width * baseWidth);
+  const pxH = Math.round(batchCropRect.height * baseHeight);
+  context.save();
+  context.fillStyle = "rgba(20, 22, 34, 0.78)";
+  context.font = "600 12px Segoe UI, sans-serif";
+  const label = `${pxW} × ${pxH}px`;
+  const textWidth = context.measureText(label).width + 12;
+  context.fillRect(box.x, Math.max(originY, box.y - 22), textWidth, 18);
+  context.fillStyle = "#fff";
+  context.fillText(label, box.x + 6, Math.max(originY + 13, box.y - 9));
+  context.restore();
+
+  batchCropFrame = { originX, originY, drawWidth, drawHeight, scale, baseWidth, baseHeight, box };
+}
+
+function getBatchCropPoint(event) {
+  const rect = batchCropPreviewCanvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * (batchCropPreviewCanvas.width / rect.width),
+    y: (event.clientY - rect.top) * (batchCropPreviewCanvas.height / rect.height),
+  };
+}
+
+function batchCropNormalized(point) {
+  return {
+    x: (point.x - batchCropFrame.originX) / batchCropFrame.drawWidth,
+    y: (point.y - batchCropFrame.originY) / batchCropFrame.drawHeight,
+  };
+}
+
+function getBatchCropHandle(point) {
+  if (!batchCropFrame) return null;
+  const box = batchCropFrame.box;
+  const hitRadius = 12;
+  const handles = [
+    { name: "nw", x: box.x, y: box.y, cursor: "nwse-resize" },
+    { name: "ne", x: box.x + box.width, y: box.y, cursor: "nesw-resize" },
+    { name: "sw", x: box.x, y: box.y + box.height, cursor: "nesw-resize" },
+    { name: "se", x: box.x + box.width, y: box.y + box.height, cursor: "nwse-resize" },
+  ];
+  return handles.find((handle) => Math.hypot(point.x - handle.x, point.y - handle.y) <= hitRadius) || null;
+}
+
+function pointInsideBatchCrop(point) {
+  if (!batchCropFrame) return false;
+  const box = batchCropFrame.box;
+  return point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
+}
+
+function pointInsideBatchCropImage(point) {
+  if (!batchCropFrame) return false;
+  return (
+    point.x >= batchCropFrame.originX &&
+    point.x <= batchCropFrame.originX + batchCropFrame.drawWidth &&
+    point.y >= batchCropFrame.originY &&
+    point.y <= batchCropFrame.originY + batchCropFrame.drawHeight
+  );
+}
+
+function updateBatchCropCursor(point) {
+  const handle = getBatchCropHandle(point);
+  batchCropPreviewCanvas.style.cursor = handle
+    ? handle.cursor
+    : pointInsideBatchCrop(point) ? "grab" : pointInsideBatchCropImage(point) ? "crosshair" : "default";
+}
+
+batchCropPreviewCanvas.addEventListener("pointerdown", (event) => {
+  if (batchCropRunning || !batchCropFrame || event.button !== 0) return;
+  const point = getBatchCropPoint(event);
+  const handle = getBatchCropHandle(point);
+  if (handle) {
+    batchCropInteraction = { type: "resize", handle: handle.name, start: batchCropNormalized(point), original: { ...batchCropRect } };
+  } else if (pointInsideBatchCrop(point)) {
+    batchCropInteraction = { type: "move", start: batchCropNormalized(point), original: { ...batchCropRect } };
+  } else if (pointInsideBatchCropImage(point)) {
+    const norm = batchCropNormalized(point);
+    batchCropDrawing = { x: norm.x, y: norm.y };
+  } else {
+    return;
+  }
+  batchCropPreviewCanvas.setPointerCapture(event.pointerId);
+});
+
+batchCropPreviewCanvas.addEventListener("pointermove", (event) => {
+  if (!batchCropFrame) return;
+  const point = getBatchCropPoint(event);
+  if (batchCropDrawing) {
+    const norm = batchCropNormalized(point);
+    writeCropRect({
+      x: Math.min(batchCropDrawing.x, norm.x),
+      y: Math.min(batchCropDrawing.y, norm.y),
+      width: Math.max(0.02, Math.abs(norm.x - batchCropDrawing.x)),
+      height: Math.max(0.02, Math.abs(norm.y - batchCropDrawing.y)),
+    });
+    constrainBatchCropRect();
+    propagateCropRect();
+    drawBatchCropPreview();
+    return;
+  }
+  if (!batchCropInteraction) {
+    updateBatchCropCursor(point);
+    return;
+  }
+  const current = batchCropNormalized(point);
+  const interaction = batchCropInteraction;
+  const dx = current.x - interaction.start.x;
+  const dy = current.y - interaction.start.y;
+  const original = interaction.original;
+  if (interaction.type === "move") {
+    writeCropRect({ ...original, x: original.x + dx, y: original.y + dy });
+  } else {
+    let left = original.x;
+    let top = original.y;
+    let right = original.x + original.width;
+    let bottom = original.y + original.height;
+    if (interaction.handle.includes("w")) left = Math.min(original.x + dx, right - 0.02);
+    if (interaction.handle.includes("e")) right = Math.max(original.x + original.width + dx, left + 0.02);
+    if (interaction.handle.includes("n")) top = Math.min(original.y + dy, bottom - 0.02);
+    if (interaction.handle.includes("s")) bottom = Math.max(original.y + original.height + dy, top + 0.02);
+    writeCropRect({ x: left, y: top, width: right - left, height: bottom - top });
+  }
+  constrainBatchCropRect();
+  propagateCropRect();
+  drawBatchCropPreview();
+});
+
+function endBatchCropInteraction(event) {
+  if (!batchCropInteraction && !batchCropDrawing) return;
+  batchCropInteraction = null;
+  batchCropDrawing = null;
+  try {
+    batchCropPreviewCanvas.releasePointerCapture(event.pointerId);
+  } catch (error) {
+    /* already released */
+  }
+  if (batchCropFrame) updateBatchCropCursor(getBatchCropPoint(event));
+}
+
+batchCropPreviewCanvas.addEventListener("pointerup", endBatchCropInteraction);
+batchCropPreviewCanvas.addEventListener("pointercancel", endBatchCropInteraction);
+
+function syncBatchCropControls() {
+  const ready = batchCropSources.length > 0;
+  batchCropRunBtn.disabled = !ready || batchCropRunning;
+  batchCropCancelBtn.disabled = !batchCropRunning || batchCropCancelRequested;
+  batchCropRunBtn.textContent = batchCropRunning
+    ? "처리 중..."
+    : ready ? `${batchCropSources.length}개 자르기` : "일괄 자르기";
+  [batchCropSourceInput, batchCropPrefix, batchCropFormat].forEach((control) => {
+    if (control) control.disabled = batchCropRunning;
+  });
+}
+
+function buildBatchCropResultCard(item) {
+  const card = document.createElement("article");
+  card.className = "tile-card";
+  const image = document.createElement("img");
+  image.src = item.url;
+  image.alt = item.file;
+  const footer = document.createElement("div");
+  footer.className = "tile-footer";
+  const name = document.createElement("strong");
+  name.className = "tile-name";
+  name.textContent = item.file;
+  const dim = document.createElement("span");
+  dim.className = "tile-dim";
+  dim.textContent = `${item.width} × ${item.height}px`;
+  const actions = document.createElement("div");
+  actions.className = "tile-actions";
+  const link = document.createElement("a");
+  link.href = item.url;
+  link.download = item.file;
+  link.textContent = "저장";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "tile-remove";
+  remove.textContent = "삭제";
+  remove.addEventListener("click", () => {
+    if (!batchCropRunning) removeBatchCropResult(item.id);
+  });
+  actions.append(link, remove);
+  footer.append(name, dim, actions);
+  card.append(image, footer);
+  return card;
+}
+
+function renderBatchCropResults() {
+  [batchCropResultGrid, worksBatchCropGrid].forEach((grid) => {
+    if (!grid) return;
+    grid.innerHTML = "";
+    batchCropResults.slice().reverse().forEach((item) => grid.append(buildBatchCropResultCard(item)));
+  });
+  const hasResults = batchCropResults.length > 0;
+  batchCropResultEmpty.classList.toggle("is-hidden", hasResults);
+  if (worksBatchCropEmpty) worksBatchCropEmpty.classList.toggle("is-hidden", hasResults);
+  batchCropDownloadAll.disabled = !hasResults || batchCropRunning;
+  if (downloadBatchCropWorks) downloadBatchCropWorks.disabled = !hasResults || batchCropRunning;
+  batchCropClearResults.disabled = !hasResults || batchCropRunning;
+  if (clearBatchCropWorks) clearBatchCropWorks.disabled = !hasResults || batchCropRunning;
+  batchCropResultCount.textContent = `${batchCropResults.length}개`;
+  if (worksBatchCropCount) worksBatchCropCount.textContent = `${batchCropResults.length}개`;
+  batchCropResultHint.textContent = hasResults ? `완성된 파일 ${batchCropResults.length}개` : "자르기 완료 후 파일이 여기에 표시됩니다";
+  updateWorksSummary();
+  updateWorksBadge();
+}
+
+function removeBatchCropResult(id) {
+  const index = batchCropResults.findIndex((item) => item.id === id);
+  if (index === -1) return;
+  const [item] = batchCropResults.splice(index, 1);
+  URL.revokeObjectURL(item.url);
+  renderBatchCropResults();
+}
+
+function clearBatchCropResultsAll() {
+  if (batchCropRunning || !batchCropResults.length) return;
+  batchCropResults.forEach((item) => URL.revokeObjectURL(item.url));
+  batchCropResults = [];
+  renderBatchCropResults();
+  setBatchCropStatus("결과를 비웠어요");
+}
+
+async function runBatchCrop() {
+  const targets = batchCropSources;
+  if (batchCropRunning || !targets.length) return;
+  batchCropRunning = true;
+  batchCropCancelRequested = false;
+  batchCropProgress.hidden = false;
+  batchCropProgressBar.max = targets.length;
+  batchCropProgressBar.value = 0;
+  batchCropProgressText.textContent = `0 / ${targets.length}`;
+  syncBatchCropControls();
+  renderBatchCropResults();
+
+  const mimeType = batchCropFormat.value;
+  const extension = mimeType.split("/")[1].replace("jpeg", "jpg");
+  const safePrefix = (batchCropPrefix.value || "crop").trim().replace(/[\\/:*?"<>|]+/g, "-") || "crop";
+  let completed = 0;
+  let failed = false;
+
+  try {
+    for (const source of targets) {
+      if (batchCropCancelRequested) break;
+      setBatchCropStatus(`${source.file.name} 처리 중`);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+
+      const baseW = source.image.naturalWidth;
+      const baseH = source.image.naturalHeight;
+      const rect = source.rect;
+      let cw = Math.max(1, Math.round(rect.width * baseW));
+      let ch = Math.max(1, Math.round(rect.height * baseH));
+      let cx = Math.round(rect.x * baseW);
+      let cy = Math.round(rect.y * baseH);
+      cw = Math.min(cw, baseW);
+      ch = Math.min(ch, baseH);
+      cx = Math.min(Math.max(0, cx), baseW - cw);
+      cy = Math.min(Math.max(0, cy), baseH - ch);
+
+      const out = bcropExport.size(cw, ch);
+      const output = document.createElement("canvas");
+      output.width = out.width;
+      output.height = out.height;
+      const context = output.getContext("2d");
+      if (mimeType === "image/jpeg") {
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, out.width, out.height);
+      }
+      context.drawImage(source.image, cx, cy, cw, ch, 0, 0, out.width, out.height);
+
+      const blob = await canvasToBlob(output, mimeType);
+      const originalName = source.file.name.replace(/\.[^.]+$/, "");
+      const serial = String(batchCropResults.length + 1).padStart(3, "0");
+      const item = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        blob,
+        url: URL.createObjectURL(blob),
+        file: `${safePrefix}_${serial}_${originalName}.${extension}`,
+        width: out.width,
+        height: out.height,
+        date: Date.now(),
+      };
+      batchCropResults.push(item);
+      completed += 1;
+      batchCropProgressBar.value = completed;
+      batchCropProgressText.textContent = `${completed} / ${targets.length}`;
+      renderBatchCropResults();
+      if (batchCropAutoDownload.checked) downloadOne(item);
+    }
+  } catch (error) {
+    failed = true;
+  } finally {
+    const cancelled = batchCropCancelRequested;
+    batchCropRunning = false;
+    batchCropCancelRequested = false;
+    syncBatchCropControls();
+    renderBatchCropResults();
+    setBatchCropStatus(
+      failed
+        ? `처리 중 오류 발생 · ${completed}개 완료`
+        : cancelled ? `실행 취소됨 · ${completed}개 완료` : `일괄 자르기 완료 · ${completed}개`
+    );
+  }
+}
+
+function cancelBatchCrop() {
+  if (!batchCropRunning) return;
+  batchCropCancelRequested = true;
+  batchCropCancelBtn.disabled = true;
+  setBatchCropStatus("현재 파일 처리 후 실행을 취소합니다");
+}
+
+async function downloadBatchCropZip() {
+  if (!batchCropResults.length) return;
+  setBatchCropStatus("ZIP 파일 생성 중");
+  const files = [];
+  for (const item of batchCropResults) {
+    files.push({ name: item.file, bytes: new Uint8Array(await item.blob.arrayBuffer()) });
+  }
+  downloadBlobAs(makeZip(files), `batch-crop_${Date.now()}.zip`);
+  setBatchCropStatus("ZIP 저장 완료");
+}
+
+batchCropSourceInput.addEventListener("change", (event) => {
+  addBatchCropSources(event.target.files);
+  event.target.value = "";
+});
+wireBatchDropzone(batchCropSourceDropzone, addBatchCropSources);
+if (batchCropWInput) batchCropWInput.addEventListener("change", applyBatchCropSize);
+if (batchCropHInput) batchCropHInput.addEventListener("change", applyBatchCropSize);
+if (batchCropFromCenter) {
+  batchCropFromCenter.addEventListener("change", () => {
+    constrainBatchCropRect();
+    propagateCropRect();
+    drawBatchCropPreview();
+  });
+}
+batchCropRunBtn.addEventListener("click", runBatchCrop);
+batchCropCancelBtn.addEventListener("click", cancelBatchCrop);
+batchCropDownloadAll.addEventListener("click", downloadBatchCropZip);
+batchCropClearResults.addEventListener("click", clearBatchCropResultsAll);
+if (downloadBatchCropWorks) downloadBatchCropWorks.addEventListener("click", downloadBatchCropZip);
+if (clearBatchCropWorks) clearBatchCropWorks.addEventListener("click", clearBatchCropResultsAll);
+if (batchCropSelectAll) {
+  batchCropSelectAll.addEventListener("click", () => {
+    if (batchCropRunning || !batchCropSources.length) return;
+    const turnOn = !batchCropSources.every((source) => source.selected);
+    batchCropSources.forEach((source) => (source.selected = turnOn));
+    if (turnOn) {
+      const ref = batchCropSources[batchCropSelected] || batchCropSources[0];
+      batchCropSources.forEach((source) => (source.rect = { ...ref.rect }));
+    }
+    renderBatchCropSources();
+    drawBatchCropPreview();
+    syncBatchCropControls();
+  });
+}
 
 /* ============================================================
    IndexedDB — persistent "내 작업" store
@@ -2057,14 +3327,19 @@ async function loadWorksFromDb() {
 /* ============================================================
    View switching + theme
    ============================================================ */
+let currentViewName = "edit";
+
 function setView(name, navButton) {
   Object.entries(views).forEach(([key, element]) => {
     if (element) element.hidden = key !== name;
   });
   navItems.forEach((button) => button.classList.remove("is-active"));
   if (navButton) navButton.classList.add("is-active");
+  currentViewName = name;
+  updateHowtoFab();
   if (name === "edit") requestAnimationFrame(resizeCanvasToStage);
   if (name === "batch") requestAnimationFrame(drawBatchPreview);
+  if (name === "batchcrop") requestAnimationFrame(drawBatchCropPreview);
 }
 
 navItems.forEach((button) => {
@@ -2072,14 +3347,12 @@ navItems.forEach((button) => {
 });
 
 function applyTheme(name) {
-  const selectedTheme = ["light", "teal", "dark"].includes(name) ? name : "light";
-  document.documentElement.classList.toggle("theme-dark", selectedTheme === "dark");
-  document.documentElement.classList.toggle("theme-teal", selectedTheme === "teal");
+  document.documentElement.classList.toggle("theme-dark", name === "dark");
   document.querySelectorAll(".seg-btn[data-theme]").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.theme === selectedTheme);
+    button.classList.toggle("is-active", button.dataset.theme === name);
   });
   try {
-    localStorage.setItem("cookielab-theme", selectedTheme);
+    localStorage.setItem("cookielab-theme", name);
   } catch (error) {
     /* storage unavailable */
   }
@@ -2403,20 +3676,443 @@ clearBatchWorks.addEventListener("click", clearBatchResults);
 downloadRenameWorks.addEventListener("click", downloadRenameZip);
 clearRenameWorks.addEventListener("click", clearRenameWorksEntries);
 
+/* ============================================================
+   파일 일괄 편집하기 — 모드 전환 + 용량 줄이기(압축)
+   ============================================================ */
+const editFilesModeSeg = document.getElementById("editFilesModeSeg");
+const editFilesRenamePanel = document.getElementById("editFilesRenamePanel");
+const editFilesCompressPanel = document.getElementById("editFilesCompressPanel");
+const editFilesSubtitle = document.getElementById("editFilesSubtitle");
+
+function setEditFilesMode(mode) {
+  document.querySelectorAll("#editFilesModeSeg .seg-btn").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.emode === mode);
+  });
+  if (editFilesRenamePanel) editFilesRenamePanel.hidden = mode !== "rename";
+  if (editFilesCompressPanel) editFilesCompressPanel.hidden = mode !== "compress";
+  if (editFilesSubtitle) {
+    editFilesSubtitle.textContent = mode === "compress"
+      ? "이미지 용량을 줄여 새 파일로 저장해요"
+      : "여러 파일을 올려 이름을 한꺼번에 또는 하나씩 바꿔요";
+  }
+}
+
+if (editFilesModeSeg) {
+  editFilesModeSeg.querySelectorAll(".seg-btn").forEach((button) => {
+    button.addEventListener("click", () => setEditFilesMode(button.dataset.emode));
+  });
+}
+
+const compressInput = document.getElementById("compressInput");
+const compressDropzone = document.getElementById("compressDropzone");
+const compressList = document.getElementById("compressList");
+const compressEmpty = document.getElementById("compressEmpty");
+const compressCount = document.getElementById("compressCount");
+const compressSummary = document.getElementById("compressSummary");
+const compressFormat = document.getElementById("compressFormat");
+const compressQuality = document.getElementById("compressQuality");
+const compressQualityValue = document.getElementById("compressQualityValue");
+const compressQualityRow = document.getElementById("compressQualityRow");
+const compressResizeToggle = document.getElementById("compressResizeToggle");
+const compressResizeFields = document.getElementById("compressResizeFields");
+const compressMaxWidth = document.getElementById("compressMaxWidth");
+const compressApply = document.getElementById("compressApply");
+const compressDownloadAll = document.getElementById("compressDownloadAll");
+const compressClear = document.getElementById("compressClear");
+
+let compressEntries = [];
+
+function formatBytes(bytes) {
+  if (!bytes && bytes !== 0) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function compressOutName(entry, format) {
+  const ext = format === "image/png" ? ".png" : format === "image/webp" ? ".webp" : ".jpg";
+  return `${safeRenameBase(entry.base, entry.base)}_min${ext}`;
+}
+
+function loadCompressFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      const { base, ext } = splitFileName(file.name);
+      resolve({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        file,
+        originalName: file.name,
+        base,
+        ext,
+        url,
+        image,
+        originalSize: file.size,
+        out: null,
+      });
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("image load failed"));
+    };
+    image.src = url;
+  });
+}
+
+async function addCompressFiles(fileList) {
+  const files = Array.from(fileList || []).filter((file) => file.type.startsWith("image/"));
+  if (!files.length) {
+    setRenameStatus("이미지 파일만 압축할 수 있어요");
+    return;
+  }
+  const loaded = await Promise.allSettled(files.map(loadCompressFile));
+  loaded.forEach((result) => {
+    if (result.status === "fulfilled") compressEntries.push(result.value);
+  });
+  renderCompressList();
+  setRenameStatus(`${compressEntries.length}개 이미지 준비됨`);
+}
+
+function removeCompressEntry(id) {
+  const index = compressEntries.findIndex((entry) => entry.id === id);
+  if (index === -1) return;
+  const [entry] = compressEntries.splice(index, 1);
+  if (entry.url) URL.revokeObjectURL(entry.url);
+  if (entry.out) URL.revokeObjectURL(entry.out.url);
+  renderCompressList();
+}
+
+function clearCompressEntries() {
+  compressEntries.forEach((entry) => {
+    if (entry.url) URL.revokeObjectURL(entry.url);
+    if (entry.out) URL.revokeObjectURL(entry.out.url);
+  });
+  compressEntries = [];
+  renderCompressList();
+  setRenameStatus("압축 목록을 비웠어요");
+}
+
+function renderCompressList() {
+  const has = compressEntries.length > 0;
+  const done = compressEntries.filter((entry) => entry.out);
+  compressList.innerHTML = "";
+  compressEmpty.classList.toggle("is-hidden", has);
+  compressCount.textContent = `${compressEntries.length}개`;
+  compressApply.disabled = !has;
+  compressDownloadAll.disabled = done.length === 0;
+  compressClear.disabled = !has;
+
+  if (done.length) {
+    const before = done.reduce((sum, entry) => sum + entry.originalSize, 0);
+    const after = done.reduce((sum, entry) => sum + entry.out.size, 0);
+    const saved = before > 0 ? Math.round((1 - after / before) * 100) : 0;
+    compressSummary.textContent = `${formatBytes(before)} → ${formatBytes(after)} (${saved >= 0 ? "-" : "+"}${Math.abs(saved)}%)`;
+  } else {
+    compressSummary.textContent = "원본 대비 절감량이 표시돼요";
+  }
+
+  compressEntries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "rename-row";
+
+    const thumb = document.createElement("div");
+    thumb.className = "rename-thumb";
+    const img = document.createElement("img");
+    img.src = entry.url;
+    img.alt = entry.originalName;
+    thumb.append(img);
+
+    const meta = document.createElement("div");
+    meta.className = "rename-meta";
+    const orig = document.createElement("span");
+    orig.className = "rename-orig";
+    orig.textContent = entry.originalName;
+    const info = document.createElement("span");
+    info.className = "compress-info";
+    if (entry.out) {
+      const saved = entry.originalSize > 0 ? Math.round((1 - entry.out.size / entry.originalSize) * 100) : 0;
+      info.textContent = `${formatBytes(entry.originalSize)} → ${formatBytes(entry.out.size)} · ${saved >= 0 ? "-" : "+"}${Math.abs(saved)}% · ${entry.out.width}×${entry.out.height}`;
+      info.classList.toggle("is-bigger", saved < 0);
+    } else {
+      info.textContent = `원본 ${formatBytes(entry.originalSize)} · ${entry.image.naturalWidth}×${entry.image.naturalHeight}`;
+    }
+    meta.append(orig, info);
+
+    const actions = document.createElement("div");
+    actions.className = "rename-row-actions";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "mini-btn";
+    save.textContent = "저장";
+    save.disabled = !entry.out;
+    save.addEventListener("click", () => {
+      if (entry.out) downloadBlobAs(entry.out.blob, entry.out.name);
+    });
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "mini-btn danger";
+    del.textContent = "✕";
+    del.title = "목록에서 제거";
+    del.setAttribute("aria-label", "목록에서 제거");
+    del.addEventListener("click", () => removeCompressEntry(entry.id));
+    actions.append(save, del);
+
+    row.append(thumb, meta, actions);
+    compressList.append(row);
+  });
+}
+
+async function encodeCompressEntry(entry, format, quality, maxWidth) {
+  const iw = entry.image.naturalWidth;
+  const ih = entry.image.naturalHeight;
+  let tw = iw;
+  let th = ih;
+  if (maxWidth && iw > maxWidth) {
+    tw = maxWidth;
+    th = Math.max(1, Math.round((ih * maxWidth) / iw));
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = tw;
+  canvas.height = th;
+  const context = canvas.getContext("2d");
+  if (format === "image/jpeg") {
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, tw, th);
+  }
+  context.drawImage(entry.image, 0, 0, tw, th);
+  const blob = await canvasToBlob(canvas, format, format === "image/png" ? undefined : quality);
+  return { blob, width: tw, height: th };
+}
+
+async function applyCompress() {
+  if (!compressEntries.length || compressApply.disabled) return;
+  compressApply.disabled = true;
+  const format = compressFormat.value;
+  const quality = clampNumber(compressQuality.value, 10, 100, 80) / 100;
+  const maxWidth = compressResizeToggle.checked
+    ? Math.round(clampNumber(compressMaxWidth.value, 100, 10000, 1920))
+    : 0;
+  setRenameStatus("용량을 줄이는 중…");
+  for (const entry of compressEntries) {
+    try {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const result = await encodeCompressEntry(entry, format, quality, maxWidth);
+      if (entry.out) URL.revokeObjectURL(entry.out.url);
+      entry.out = {
+        blob: result.blob,
+        url: URL.createObjectURL(result.blob),
+        size: result.blob.size,
+        width: result.width,
+        height: result.height,
+        name: compressOutName(entry, format),
+      };
+    } catch (error) {
+      /* skip this file */
+    }
+  }
+  renderCompressList();
+  setRenameStatus("용량 줄이기를 적용했어요");
+}
+
+async function downloadCompressZip() {
+  const done = compressEntries.filter((entry) => entry.out);
+  if (!done.length) return;
+  setRenameStatus("ZIP 생성 중…");
+  const used = new Map();
+  const files = [];
+  for (const entry of done) {
+    let name = entry.out.name;
+    if (used.has(name)) {
+      const count = used.get(name) + 1;
+      used.set(name, count);
+      const parts = splitFileName(name);
+      name = `${parts.base}_${count}${parts.ext}`;
+    } else {
+      used.set(name, 1);
+    }
+    files.push({ name, bytes: new Uint8Array(await entry.out.blob.arrayBuffer()) });
+  }
+  downloadBlobAs(makeZip(files), `compressed_${Date.now()}.zip`);
+  setRenameStatus(`${files.length}개 파일을 ZIP으로 저장했어요`);
+}
+
+function syncCompressQualityUi() {
+  const isPng = compressFormat.value === "image/png";
+  compressQualityValue.textContent = `${compressQuality.value}%`;
+  compressQualityRow.classList.toggle("is-disabled", isPng);
+  compressQuality.disabled = isPng;
+}
+
+if (compressInput) {
+  compressInput.addEventListener("change", (event) => {
+    addCompressFiles(event.target.files);
+    compressInput.value = "";
+  });
+  wireBatchDropzone(compressDropzone, addCompressFiles);
+  compressFormat.addEventListener("change", syncCompressQualityUi);
+  compressQuality.addEventListener("input", syncCompressQualityUi);
+  compressResizeToggle.addEventListener("change", () => {
+    compressResizeFields.hidden = !compressResizeToggle.checked;
+  });
+  compressApply.addEventListener("click", applyCompress);
+  compressDownloadAll.addEventListener("click", downloadCompressZip);
+  compressClear.addEventListener("click", clearCompressEntries);
+}
+
+/* ============================================================
+   사용 방법 — 움직이는(애니메이션) 안내 데모
+   ============================================================ */
+const howtoFab = document.getElementById("howtoFab");
+const howtoModal = document.getElementById("howtoModal");
+const howtoStage = document.getElementById("howtoStage");
+const howtoSteps = document.getElementById("howtoSteps");
+const howtoTitle = document.getElementById("howtoTitle");
+const howtoClose = document.getElementById("howtoClose");
+
+const HOWTO_PHOTO_DEFS = `
+  <defs>
+    <linearGradient id="hoPhoto" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbcfe8" />
+      <stop offset="1" stop-color="#c7d2fe" />
+    </linearGradient>
+  </defs>`;
+
+function howtoScenery(x, y, w, h) {
+  return `
+    <circle cx="${x + w * 0.24}" cy="${y + h * 0.32}" r="${h * 0.12}" fill="#fde68a" />
+    <path d="M${x} ${y + h * 0.82} L${x + w * 0.3} ${y + h * 0.5} L${x + w * 0.5} ${y + h * 0.72} L${x + w * 0.68} ${y + h * 0.56} L${x + w} ${y + h * 0.86} L${x + w} ${y + h} L${x} ${y + h} Z" fill="#a7f3d0" opacity="0.9" />`;
+}
+
+const HOWTO = {
+  edit: {
+    title: "쉽게 자르기",
+    steps: [
+      "이미지를 업로드해요.",
+      "도형을 골라 이미지 위에서 드래그해 영역을 그려요. (Shift=정비율, Alt=회전)",
+      "‘현재 영역 자르기’를 누르면 결과에 바로 담겨요.",
+    ],
+    svg: `<svg viewBox="0 0 320 190" class="ho-svg" role="img" aria-label="자르기 동작 미리보기">
+      ${HOWTO_PHOTO_DEFS}
+      <rect x="30" y="24" width="180" height="142" rx="12" fill="url(#hoPhoto)" />
+      ${howtoScenery(30, 24, 180, 142)}
+      <rect class="ho-cropbox" x="64" y="52" width="8" height="8" rx="3" fill="rgba(45,212,191,0.18)" stroke="#14b8a6" stroke-width="2.5" stroke-dasharray="7 6" />
+      <g class="ho-cursor"><path d="M0 0 L0 19 L5 14 L9 22 L13 20 L9 13 L16 13 Z" fill="#1f2330" stroke="#fff" stroke-width="1.3" /></g>
+      <g class="ho-result">
+        <rect x="240" y="60" width="62" height="62" rx="10" fill="url(#hoPhoto)" stroke="#fff" stroke-width="3" />
+        <circle cx="258" cy="80" r="8" fill="#fde68a" />
+      </g>
+      <text x="240" y="142" class="ho-result" fill="#16a34a" font-size="13" font-weight="800">저장됨 ✓</text>
+    </svg>`,
+  },
+  batchcrop: {
+    title: "일괄 자르기",
+    steps: [
+      "여러 이미지를 업로드해요.",
+      "사진마다 자를 영역을 지정하고, 처리할 사진을 체크해요.",
+      "‘선택한 N개 자르기’를 누르면 한 번에 잘려요.",
+    ],
+    svg: `<svg viewBox="0 0 320 190" class="ho-svg" role="img" aria-label="일괄 자르기 미리보기">
+      ${HOWTO_PHOTO_DEFS}
+      <g class="ho-fade1"><rect x="18" y="22" width="58" height="44" rx="7" fill="url(#hoPhoto)" /><rect x="22" y="26" width="14" height="14" rx="3" fill="#fff" stroke="#e24a99" stroke-width="2" /><path class="ho-tick" d="M25 33 l3 3 l6 -7" fill="none" stroke="#e24a99" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></g>
+      <g class="ho-fade2"><rect x="18" y="74" width="58" height="44" rx="7" fill="url(#hoPhoto)" /><rect x="22" y="78" width="14" height="14" rx="3" fill="#fff" stroke="#e24a99" stroke-width="2" /><path class="ho-tick" d="M25 85 l3 3 l6 -7" fill="none" stroke="#e24a99" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></g>
+      <g class="ho-fade3"><rect x="18" y="126" width="58" height="44" rx="7" fill="url(#hoPhoto)" /><rect x="22" y="130" width="14" height="14" rx="3" fill="#fff" stroke="#e24a99" stroke-width="2" /><path class="ho-tick" d="M25 137 l3 3 l6 -7" fill="none" stroke="#e24a99" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" /></g>
+      <rect x="104" y="40" width="118" height="100" rx="10" fill="url(#hoPhoto)" />
+      ${howtoScenery(104, 40, 118, 100)}
+      <rect class="ho-cropbox2" x="124" y="58" width="78" height="64" rx="4" fill="rgba(45,212,191,0.16)" stroke="#14b8a6" stroke-width="2.5" stroke-dasharray="7 6" />
+      <g class="ho-result"><rect x="246" y="56" width="56" height="46" rx="8" fill="url(#hoPhoto)" stroke="#fff" stroke-width="3" /><rect x="246" y="110" width="56" height="46" rx="8" fill="url(#hoPhoto)" stroke="#fff" stroke-width="3" /></g>
+    </svg>`,
+  },
+  batch: {
+    title: "일괄 붙여넣기",
+    steps: [
+      "원본 이미지들과 붙여넣을 이미지(로고 등)를 올려요.",
+      "사진마다 위치·크기를 맞추고, 처리할 사진을 체크해요.",
+      "‘선택한 N개 붙여넣기’로 한 번에 합성해요.",
+    ],
+    svg: `<svg viewBox="0 0 320 190" class="ho-svg" role="img" aria-label="일괄 붙여넣기 미리보기">
+      ${HOWTO_PHOTO_DEFS}
+      <rect x="40" y="30" width="150" height="130" rx="12" fill="url(#hoPhoto)" />
+      ${howtoScenery(40, 30, 150, 130)}
+      <g class="ho-stamp"><rect x="150" y="120" width="34" height="34" rx="8" fill="#1f2330" /><text x="167" y="143" fill="#fff" font-size="18" font-weight="800" text-anchor="middle">★</text></g>
+      <g class="ho-result">
+        <rect x="222" y="40" width="80" height="46" rx="8" fill="url(#hoPhoto)" stroke="#fff" stroke-width="3" /><rect x="286" y="68" width="13" height="13" rx="3" fill="#1f2330" />
+        <rect x="222" y="100" width="80" height="46" rx="8" fill="url(#hoPhoto)" stroke="#fff" stroke-width="3" /><rect x="286" y="128" width="13" height="13" rx="3" fill="#1f2330" />
+      </g>
+    </svg>`,
+  },
+  rename: {
+    title: "파일 일괄 편집하기",
+    steps: [
+      "파일을 올려요.",
+      "‘파일명 변경’에서 번호·찾기바꾸기·접두접미로 한 번에 정리해요.",
+      "‘용량 줄이기’에서 품질·크기를 조절해 가볍게 저장해요.",
+    ],
+    svg: `<svg viewBox="0 0 320 190" class="ho-svg" role="img" aria-label="파일 편집 미리보기">
+      <g class="ho-fade1"><rect x="22" y="24" width="276" height="40" rx="9" fill="#f4f5fa" stroke="#e5e7f0" /><text x="36" y="49" font-size="13" font-weight="700" fill="#9aa0b4">IMG_2207.jpg</text><text x="180" y="49" font-size="13" font-weight="800" fill="#e24a99">→ photo_001.jpg</text></g>
+      <g class="ho-fade2"><rect x="22" y="74" width="276" height="40" rx="9" fill="#f4f5fa" stroke="#e5e7f0" /><text x="36" y="99" font-size="13" font-weight="700" fill="#9aa0b4">IMG_2208.jpg</text><text x="180" y="99" font-size="13" font-weight="800" fill="#e24a99">→ photo_002.jpg</text></g>
+      <g class="ho-fade3"><rect x="22" y="124" width="276" height="46" rx="9" fill="#f4f5fa" stroke="#e5e7f0" /><text x="36" y="146" font-size="12" font-weight="700" fill="#9aa0b4">사진.png · 2.4MB</text>
+        <rect x="36" y="152" width="180" height="8" rx="4" fill="#e5e7f0" /><rect class="ho-shrink" x="36" y="152" width="180" height="8" rx="4" fill="#16a34a" />
+        <text x="232" y="159" font-size="12" font-weight="800" fill="#16a34a">0.6MB</text></g>
+    </svg>`,
+  },
+};
+
+function updateHowtoFab() {
+  if (!howtoFab) return;
+  howtoFab.hidden = !HOWTO[currentViewName];
+}
+
+function openHowto() {
+  const data = HOWTO[currentViewName];
+  if (!data || !howtoModal) return;
+  howtoTitle.textContent = `${data.title} · 사용 방법`;
+  howtoStage.innerHTML = data.svg;
+  howtoSteps.innerHTML = "";
+  data.steps.forEach((step) => {
+    const li = document.createElement("li");
+    li.textContent = step;
+    howtoSteps.append(li);
+  });
+  howtoModal.hidden = false;
+}
+
+function closeHowto() {
+  if (howtoModal) howtoModal.hidden = true;
+}
+
+if (howtoFab) howtoFab.addEventListener("click", openHowto);
+if (howtoClose) howtoClose.addEventListener("click", closeHowto);
+if (howtoModal) {
+  howtoModal.addEventListener("click", (event) => {
+    if (event.target.hasAttribute("data-howto-close")) closeHowto();
+  });
+}
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && howtoModal && !howtoModal.hidden) closeHowto();
+});
+
 (function init() {
-  let savedTheme = "teal";
+  let savedTheme = "light";
   try {
-    savedTheme = localStorage.getItem("cookielab-theme") || "teal";
+    savedTheme = localStorage.getItem("cookielab-theme") || "light";
   } catch (error) {
     /* storage unavailable */
   }
-  applyTheme(["light", "teal", "dark"].includes(savedTheme) ? savedTheme : "teal");
+  applyTheme(savedTheme === "dark" ? "dark" : "light");
   setExportMode("native");
   setRenameMode("number");
+  setEditFilesMode("rename");
+  syncCompressQualityUi();
+  renderCompressList();
   loadWorksFromDb();
   renderBatchSources();
   renderBatchResults();
   syncBatchControls();
+  renderBatchCropSources();
+  renderBatchCropResults();
+  syncBatchCropControls();
   syncControls();
+  updateHowtoFab();
   resizeCanvasToStage();
 })();
