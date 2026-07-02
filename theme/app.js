@@ -408,9 +408,10 @@ function drawStage() {
   const rect = cropToDisplayRect();
   const centerX = rect.x + rect.width / 2;
   const centerY = rect.y + rect.height / 2;
+  const themeAccent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#2dd4bf";
   ctx.save();
-  ctx.fillStyle = "rgba(45, 212, 191, 0.18)";
-  ctx.strokeStyle = "#2dd4bf";
+  ctx.fillStyle = themeAccent;
+  ctx.strokeStyle = themeAccent;
   ctx.lineWidth = 2;
   ctx.setLineDash([9, 7]);
   ctx.save();
@@ -420,7 +421,9 @@ function drawStage() {
     ctx.translate(-centerX, -centerY);
   }
   applyShapePath(ctx, activeShape, rect.x, rect.y, rect.width, rect.height);
+  ctx.globalAlpha = 0.18;
   ctx.fill();
+  ctx.globalAlpha = 1;
   ctx.stroke();
   ctx.restore();
   ctx.setLineDash([]);
@@ -435,7 +438,7 @@ function drawHandles(rect) {
   const size = 10;
   ctx.save();
   ctx.fillStyle = "#ffffff";
-  ctx.strokeStyle = "#14b8a6";
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#14b8a6";
   ctx.lineWidth = 2;
   HANDLES.forEach((handle) => {
     const cx = rect.x + rect.width * handle.fx;
@@ -466,11 +469,14 @@ function drawFreeformPreview() {
     else ctx.lineTo(point.x, point.y);
   });
   if (!isDrawingFreeform && points.length > 2) ctx.closePath();
-  ctx.fillStyle = "rgba(49, 111, 159, 0.2)";
-  ctx.strokeStyle = "#316f9f";
+  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#316f9f";
+  ctx.fillStyle = accent;
+  ctx.strokeStyle = accent;
   ctx.lineWidth = 2;
   ctx.setLineDash([8, 6]);
+  ctx.globalAlpha = 0.2;
   ctx.fill();
+  ctx.globalAlpha = 1;
   ctx.stroke();
   ctx.restore();
 }
@@ -3617,12 +3623,15 @@ navItems.forEach((button) => {
 });
 
 function applyTheme(name) {
-  document.documentElement.classList.toggle("theme-dark", name === "dark");
+  const allowed = ["editorial", "light", "dark"];
+  const resolved = allowed.includes(name) ? name : "editorial";
+  document.documentElement.classList.toggle("theme-dark", resolved === "dark");
+  document.documentElement.classList.toggle("theme-editorial", resolved === "editorial");
   document.querySelectorAll(".seg-btn[data-theme]").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.theme === name);
+    button.classList.toggle("is-active", button.dataset.theme === resolved);
   });
   try {
-    localStorage.setItem("cookielab-theme", name);
+    localStorage.setItem("cookielab-theme", resolved);
   } catch (error) {
     /* storage unavailable */
   }
@@ -4389,13 +4398,13 @@ document.addEventListener("keydown", (event) => {
 });
 
 (function init() {
-  let savedTheme = "light";
+  let savedTheme = "editorial";
   try {
-    savedTheme = localStorage.getItem("cookielab-theme") || "light";
+    savedTheme = localStorage.getItem("cookielab-theme") || "editorial";
   } catch (error) {
     /* storage unavailable */
   }
-  applyTheme(savedTheme === "dark" ? "dark" : "light");
+  applyTheme(["editorial", "light", "dark"].includes(savedTheme) ? savedTheme : "editorial");
   setExportMode("native");
   syncExportQualityUi();
   setRenameMode("number");

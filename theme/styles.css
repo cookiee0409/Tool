@@ -2331,3 +2331,326 @@ p {
 @media (prefers-reduced-motion: reduce) {
   .ho-svg * { animation: none !important; }
 }
+
+/* ============================================================
+   Blush editorial theme — visual skin only
+   The original page shell, columns, navigation position, spacing,
+   and responsive layout remain controlled by the base styles above.
+   ============================================================ */
+html.theme-editorial {
+  --bg: #fbf8f5;
+  --nav-bg: #f8deda;
+  --surface: #f9e1de;
+  --surface-2: #fff3f0;
+  --stage: #fffdfb;
+  --check: #f4e8e5;
+
+  --border: #ebc5c0;
+  --border-strong: #dfa59d;
+
+  --text: #171313;
+  --text-muted: #74615d;
+  --text-faint: #a38781;
+
+  --accent: #ee9b94;
+  --accent-2: #ee9b94;
+  --accent-soft: #f5d2cd;
+  --accent-tint: rgba(238, 155, 148, 0.2);
+  --grad: linear-gradient(135deg, #171313 0%, #171313 100%);
+  --grad-soft: linear-gradient(135deg, #f8dfdc 0%, #f4cfca 100%);
+
+  --danger: #a84545;
+  --danger-tint: rgba(168, 69, 69, 0.1);
+  --success: #171313;
+  --success-tint: rgba(23, 19, 19, 0.1);
+
+  --font-sans: Inter, "Pretendard", "SUIT", "Helvetica Neue", Arial, sans-serif;
+
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+
+  --shadow-sm: 0 1px 0 rgba(83, 48, 43, 0.04);
+  --shadow-md: 0 10px 24px rgba(83, 48, 43, 0.08);
+  --shadow-pop: 0 16px 40px rgba(83, 48, 43, 0.14);
+  --ring: 0 0 0 3px rgba(238, 155, 148, 0.22);
+}
+
+html.theme-editorial body {
+  letter-spacing: -0.012em;
+}
+
+/* Left navigation: keep the original vertical placement and dimensions. */
+html.theme-editorial .app-nav {
+  border-right-color: #e9bdb7;
+  background: var(--nav-bg);
+}
+
+html.theme-editorial .nav-brand {
+  border-bottom: 1px solid rgba(210, 142, 134, 0.42);
+}
+
+html.theme-editorial .brand-logo svg {
+  border-radius: 11px;
+  filter: saturate(0.72) sepia(0.08);
+}
+
+html.theme-editorial .brand-name {
+  background: none;
+  color: var(--text);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 20px;
+  font-style: italic;
+  font-weight: 500;
+  letter-spacing: -0.045em;
+}
+
+html.theme-editorial .nav-item {
+  border: 1px solid transparent;
+  border-radius: 13px;
+  color: #665450;
+  font-weight: 550;
+}
+
+html.theme-editorial .nav-item:hover:not(.is-active) {
+  border-color: rgba(214, 149, 141, 0.38);
+  background: rgba(255, 255, 255, 0.34);
+  color: var(--text);
+}
+
+html.theme-editorial .nav-item.is-active {
+  border-color: #171313;
+  background: #171313;
+  color: #fffaf8;
+  box-shadow: none;
+}
+
+html.theme-editorial .nav-promo {
+  border: 1px solid rgba(214, 149, 141, 0.46);
+  background: rgba(255, 255, 255, 0.28);
+}
+
+html.theme-editorial .nav-promo strong {
+  color: var(--text);
+}
+
+/* Typography: editorial character without changing heading sizes or flow. */
+html.theme-editorial .page-head h1,
+html.theme-editorial .results-head h2,
+html.theme-editorial .works-group-head h2,
+html.theme-editorial .block-head h2 {
+  color: var(--text);
+  font-weight: 650;
+  letter-spacing: -0.045em;
+}
+
+html.theme-editorial .subtitle,
+html.theme-editorial .stage-empty,
+html.theme-editorial .empty-state {
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-weight: 400;
+}
+
+html.theme-editorial .subtitle {
+  color: #745f5b;
+}
+
+html.theme-editorial .status-pill {
+  border-color: rgba(218, 159, 151, 0.62);
+  background: rgba(255, 255, 255, 0.46);
+  box-shadow: none;
+  color: #665450;
+}
+
+html.theme-editorial .status-pill::before {
+  background: #171313;
+  box-shadow: 0 0 0 3px rgba(23, 19, 19, 0.08);
+}
+
+/* Main cards and outlined rectangles. Dimensions are inherited unchanged. */
+html.theme-editorial .dropzone,
+html.theme-editorial .control-block,
+html.theme-editorial .results-panel,
+html.theme-editorial .works-group {
+  border-color: rgba(222, 167, 159, 0.66);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+html.theme-editorial .dropzone {
+  background: #f8dfdc;
+}
+
+html.theme-editorial .dropzone:hover,
+html.theme-editorial .dropzone.is-dragover {
+  border-color: #171313;
+  background: #f6d7d3;
+}
+
+html.theme-editorial .upload-icon {
+  background: #171313;
+  box-shadow: none;
+  font-weight: 300;
+}
+
+html.theme-editorial .control-block {
+  background: #f9e1de;
+}
+
+html.theme-editorial .controls-col > .control-block:nth-child(even),
+html.theme-editorial .save-options,
+html.theme-editorial .rename-controls .control-block:nth-child(odd) {
+  background: #f6d3ce;
+}
+
+html.theme-editorial .results-panel,
+html.theme-editorial .works-group {
+  background: #f8ddda;
+}
+
+html.theme-editorial .block-head,
+html.theme-editorial .results-head,
+html.theme-editorial .works-group-head {
+  border-bottom: 1px solid rgba(218, 159, 151, 0.56);
+}
+
+html.theme-editorial .block-head {
+  padding-bottom: 10px;
+}
+
+html.theme-editorial .results-head,
+html.theme-editorial .works-group-head {
+  padding-bottom: 13px;
+}
+
+html.theme-editorial .stage-wrap,
+html.theme-editorial .batch-preview-wrap {
+  border-color: #e6c9c4;
+  border-radius: var(--r-lg);
+  box-shadow: none;
+}
+
+html.theme-editorial .stage-hint {
+  border-radius: var(--r-pill);
+  background: rgba(23, 19, 19, 0.86);
+}
+
+html.theme-editorial .stage-hint b {
+  color: #ffd8d2;
+}
+
+html.theme-editorial .view-toolbar {
+  border-color: #e2bbb5;
+  border-radius: var(--r-pill);
+  background: rgba(255, 253, 251, 0.94);
+  box-shadow: 0 10px 26px rgba(76, 51, 47, 0.12);
+  backdrop-filter: blur(8px);
+}
+
+/* Controls and buttons. */
+html.theme-editorial button,
+html.theme-editorial input,
+html.theme-editorial select {
+  border-color: rgba(215, 157, 149, 0.7);
+}
+
+html.theme-editorial button {
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.38);
+  font-weight: 600;
+}
+
+html.theme-editorial button:hover:not(:disabled) {
+  border-color: #171313;
+}
+
+html.theme-editorial input,
+html.theme-editorial select {
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+html.theme-editorial .seg {
+  border-color: rgba(215, 157, 149, 0.68);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+html.theme-editorial .seg-btn {
+  border-radius: 9px;
+  background: transparent;
+}
+
+html.theme-editorial .seg-btn.is-active,
+html.theme-editorial .primary,
+html.theme-editorial .primary.grad {
+  border-color: #171313;
+  background: #171313;
+  color: #fffaf8;
+  box-shadow: none;
+}
+
+html.theme-editorial .quick-btn.is-active,
+html.theme-editorial .size-preset.is-active,
+html.theme-editorial .shape-btn.is-active,
+html.theme-editorial .quick-btn.shape-quick.is-active,
+html.theme-editorial .ratio-lock[aria-pressed="true"] {
+  border-color: #171313;
+  background: #171313;
+  color: #fffaf8;
+}
+
+html.theme-editorial .shape-popup,
+html.theme-editorial .batch-save-popover,
+html.theme-editorial .howto-dialog {
+  border-color: #e0aaa3;
+  background: #fae3e0;
+}
+
+html.theme-editorial .howto-step,
+html.theme-editorial .count-chip,
+html.theme-editorial .nav-badge,
+html.theme-editorial .shape-meta {
+  background: rgba(255, 255, 255, 0.5);
+  color: #171313;
+}
+
+html.theme-editorial .empty-state,
+html.theme-editorial .batch-dropzone,
+html.theme-editorial .overlay-dropzone {
+  border-color: rgba(211, 146, 138, 0.66);
+  background: rgba(255, 255, 255, 0.22);
+  color: #806964;
+}
+
+html.theme-editorial .tile-card,
+html.theme-editorial .rename-row,
+html.theme-editorial .works-rename-item,
+html.theme-editorial .batch-file-card,
+html.theme-editorial .batch-list-item {
+  border-color: rgba(218, 159, 151, 0.66);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.42);
+  box-shadow: none;
+}
+
+html.theme-editorial .tile-card:hover {
+  border-color: #171313;
+  box-shadow: none;
+}
+
+html.theme-editorial .tile-actions a {
+  background: #171313;
+  color: #fffaf8;
+}
+
+html.theme-editorial .ghost-danger {
+  background: transparent;
+}
+
+html.theme-editorial .howto-fab {
+  border-color: rgba(255, 255, 255, 0.36);
+  background: #171313;
+  box-shadow: 0 14px 30px rgba(56, 36, 33, 0.2);
+}
