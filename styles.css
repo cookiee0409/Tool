@@ -1320,10 +1320,6 @@ p {
   touch-action: none;
 }
 
-#bgPreviewCanvas {
-  cursor: crosshair;
-}
-
 .batch-preview-hint {
   margin: 0;
   color: var(--text-muted);
@@ -2557,4 +2553,119 @@ p {
     linear-gradient(-45deg, transparent 75%, var(--check) 75%);
   background-position: 0 0, 0 8px, 8px -8px, -8px 0;
   background-size: 16px 16px;
+}
+
+/* Background remove — AI engine chip + processing overlay */
+.bg-engine-chip {
+  font-family: var(--font-sans) !important;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.bg-engine-chip.is-idle {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.bg-engine-chip.is-loading {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.bg-engine-chip.is-ready {
+  background: var(--success-tint);
+  color: var(--success);
+}
+
+.bg-engine-chip.is-error {
+  background: var(--danger-tint);
+  color: var(--danger);
+}
+
+.bg-processing {
+  position: absolute;
+  inset: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: var(--r-pill);
+  background: rgba(20, 22, 40, 0.72);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  backdrop-filter: blur(2px);
+  z-index: 2;
+}
+
+.bg-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2.5px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: bgSpin 0.8s linear infinite;
+}
+
+@keyframes bgSpin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bg-spinner { animation-duration: 2s; }
+}
+
+/* Background remove — first-use consent + cache controls */
+.bg-cache-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bg-consent {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(15, 17, 30, 0.55);
+  backdrop-filter: blur(3px);
+  z-index: 3;
+}
+
+.bg-consent-card {
+  display: grid;
+  gap: 10px;
+  max-width: 380px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  text-align: left;
+}
+
+.bg-consent-card strong {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.bg-consent-card p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.bg-consent-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
 }

@@ -4242,28 +4242,25 @@ if (compressInput) {
 }
 
 /* ============================================================
-   배경 지우기 (Background remove) — 색 기반 / 가장자리 채우기
+   배경 지우기 (Background remove) — AI 누끼 (@imgly/background-removal)
    ============================================================ */
 const bgSourceInput = document.getElementById("bgSourceInput");
 const bgSourceDropzone = document.getElementById("bgSourceDropzone");
 const bgSourceGrid = document.getElementById("bgSourceGrid");
 const bgSourceCount = document.getElementById("bgSourceCount");
 const bgStatus = document.getElementById("bgStatus");
-const bgModeSeg = document.getElementById("bgModeSeg");
-const bgModeNote = document.getElementById("bgModeNote");
-const bgColorChips = document.getElementById("bgColorChips");
-const bgAutoBtn = document.getElementById("bgAutoBtn");
-const bgTolerance = document.getElementById("bgTolerance");
-const bgToleranceValue = document.getElementById("bgToleranceValue");
-const bgFeather = document.getElementById("bgFeather");
-const bgFeatherValue = document.getElementById("bgFeatherValue");
+const bgEngineChip = document.getElementById("bgEngineChip");
 const bgFillSeg = document.getElementById("bgFillSeg");
 const bgFillColorLine = document.getElementById("bgFillColorLine");
 const bgFillColor = document.getElementById("bgFillColor");
+const bgFeather = document.getElementById("bgFeather");
+const bgFeatherValue = document.getElementById("bgFeatherValue");
 const bgPreviewCanvas = document.getElementById("bgPreviewCanvas");
 const bgPreviewWrap = bgPreviewCanvas ? bgPreviewCanvas.parentElement : null;
 const bgPreviewEmpty = document.getElementById("bgPreviewEmpty");
 const bgPreviewName = document.getElementById("bgPreviewName");
+const bgProcessing = document.getElementById("bgProcessing");
+const bgProcessingText = document.getElementById("bgProcessingText");
 const bgProgress = document.getElementById("bgProgress");
 const bgProgressText = document.getElementById("bgProgressText");
 const bgProgressBar = document.getElementById("bgProgressBar");
@@ -4278,21 +4275,157 @@ const bgPrefix = document.getElementById("bgPrefix");
 const bgAutoDownload = document.getElementById("bgAutoDownload");
 const bgDownloadAll = document.getElementById("bgDownloadAll");
 const bgClearResults = document.getElementById("bgClearResults");
+const bgConsent = document.getElementById("bgConsent");
+const bgConsentAgree = document.getElementById("bgConsentAgree");
+const bgConsentCancel = document.getElementById("bgConsentCancel");
+const bgClearCache = document.getElementById("bgClearCache");
 
-const BG_PREVIEW_MAX = 1024;
-const bgSettings = { mode: "edge", references: [], tolerance: 32, feather: 2, fill: "transparent", fillColor: "#ffffff" };
+// In-browser AI segmentation engine, loaded on demand from a CDN that resolves
+// the package's bare imports (onnxruntime-web peer dep). Model weights (~30-40MB)
+// are fetched from imgly's asset host on first use and then HTTP-cached.
+const BG_ENGINE_URL = "https://esm.sh/@imgly/background-removal@1.7.0";
+const BG_CONSENT_KEY = "cookielab-bg-consent";
+const bgSettings = { fill: "transparent", fillColor: "#ffffff", feather: 1 };
 let bgEntries = [];
 let bgSelectedIndex = -1;
 let bgResults = [];
 let bgRunning = false;
 let bgPreviewRaf = 0;
-const bgView = { scale: 1, dx: 0, dy: 0, dpr: 1, procW: 0, procH: 0 };
+let bgEngine = null;
+let bgEngineLoading = null;
+let bgConsented = false;
+let bgPendingConsentAction = null;
+const bgView = { scale: 1, dx: 0, dy: 0, dpr: 1 };
 
 function setBgStatus(message) {
   if (bgStatus) bgStatus.textContent = message;
 }
 
-function loadBgImage(file) {
+function setBgEngineChip(text, state) {
+  if (!bgEngineChip) return;
+  bgEngineChip.textContent = text;
+  bgEngineChip.className = `bg-engine-chip is-${state}`;
+}
+
+function showBgProcessing(show, text) {
+  if (!bgProcessing) return;
+  bgProcessing.hidden = !show;
+  if (text && bgProcessingText) bgProcessingText.textContent = text;
+}
+
+function showBgConsent(show) {
+  if (bgConsent) bgConsent.hidden = !show;
+}
+
+// Gate the first model download behind explicit consent. If already agreed,
+// runs the action immediately; otherwise shows the notice and defers it.
+function requestBgConsent(onAgree) {
+  if (bgConsented) {
+    if (onAgree) onAgree();
+    return;
+  }
+  bgPendingConsentAction = onAgree || null;
+  showBgConsent(true);
+}
+
+function agreeBgConsent() {
+  bgConsented = true;
+  try {
+    localStorage.setItem(BG_CONSENT_KEY, "1");
+  } catch (error) {
+    /* storage unavailable */
+  }
+  showBgConsent(false);
+  const action = bgPendingConsentAction;
+  bgPendingConsentAction = null;
+  loadBgEngine().catch(() => {});
+  if (action) action();
+  else scheduleBgPreview();
+}
+
+function cancelBgConsent() {
+  bgPendingConsentAction = null;
+  showBgConsent(false);
+  setBgStatus("AI 모델 다운로드를 취소했어요");
+}
+
+async function clearBgCache() {
+  try {
+    localStorage.removeItem(BG_CONSENT_KEY);
+  } catch (error) {
+    /* storage unavailable */
+  }
+  bgConsented = false;
+  bgEngine = null;
+  bgEngineLoading = null;
+  bgPendingConsentAction = null;
+  bgEntries.forEach((entry) => {
+    if (entry.cutoutUrl) URL.revokeObjectURL(entry.cutoutUrl);
+    entry.cutoutImage = null;
+    entry.cutoutBlob = null;
+    entry.cutoutUrl = null;
+    entry.cutoutPromise = null;
+    entry.error = null;
+    entry.done = false;
+  });
+  let cleared = 0;
+  if (window.caches && typeof caches.keys === "function") {
+    try {
+      const keys = await caches.keys();
+      await Promise.all(
+        keys.map(async (key) => {
+          if (/imgly|background|onnx|ort-|model/i.test(key)) {
+            const removed = await caches.delete(key);
+            if (removed) cleared += 1;
+          }
+        })
+      );
+    } catch (error) {
+      /* cache API unavailable */
+    }
+  }
+  setBgEngineChip("AI 대기 중", "idle");
+  showBgConsent(false);
+  showBgProcessing(false);
+  renderBgSources();
+  scheduleBgPreview();
+  syncBgControls();
+  setBgStatus(
+    cleared
+      ? `AI 모델 캐시 ${cleared}개를 삭제했어요 · 다음 사용 시 다시 내려받아요`
+      : "캐시를 초기화했어요 · 다음 사용 시 다시 내려받아요"
+  );
+}
+
+function bgProgressCb(key, current, total) {
+  if (typeof key !== "string") return;
+  if (key.startsWith("fetch") && typeof current === "number" && typeof total === "number" && total > 0) {
+    const pct = Math.min(100, Math.round((current / total) * 100));
+    setBgEngineChip(`AI 모델 내려받는 중 ${pct}%`, "loading");
+  }
+}
+
+function loadBgEngine() {
+  if (bgEngine) return Promise.resolve(bgEngine);
+  if (bgEngineLoading) return bgEngineLoading;
+  setBgEngineChip("AI 모델 불러오는 중…", "loading");
+  bgEngineLoading = import(/* webpackIgnore: true */ BG_ENGINE_URL)
+    .then((mod) => {
+      const fn = mod.removeBackground || (mod.default && mod.default.removeBackground);
+      if (typeof fn !== "function") throw new Error("removeBackground export not found");
+      bgEngine = fn;
+      setBgEngineChip("AI 준비됨", "ready");
+      return fn;
+    })
+    .catch((error) => {
+      bgEngineLoading = null;
+      setBgEngineChip("AI 불러오기 실패", "error");
+      throw error;
+    });
+  return bgEngineLoading;
+}
+
+function loadBgFile(file) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const image = new Image();
@@ -4306,7 +4439,11 @@ function loadBgImage(file) {
         ext,
         url,
         image,
-        proc: null,
+        cutoutImage: null,
+        cutoutBlob: null,
+        cutoutUrl: null,
+        cutoutPromise: null,
+        error: null,
         done: false,
       });
     };
@@ -4314,6 +4451,15 @@ function loadBgImage(file) {
       URL.revokeObjectURL(url);
       reject(new Error("image load failed"));
     };
+    image.src = url;
+  });
+}
+
+function loadImageFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("cutout load failed"));
     image.src = url;
   });
 }
@@ -4329,7 +4475,7 @@ async function addBgFiles(fileList) {
     return;
   }
   setBgStatus(`${selected.length}개 이미지를 불러오는 중…`);
-  const loaded = await Promise.allSettled(selected.map(loadBgImage));
+  const loaded = await Promise.allSettled(selected.map(loadBgFile));
   const firstNew = bgEntries.length;
   loaded.forEach((result) => {
     if (result.status === "fulfilled") bgEntries.push(result.value);
@@ -4341,10 +4487,16 @@ async function addBgFiles(fileList) {
   setBgStatus(excluded ? `${bgEntries.length}개 준비됨 · 초과분 ${excluded}개 제외` : `${bgEntries.length}개 이미지 준비됨`);
 }
 
+function disposeBgEntry(entry) {
+  if (!entry) return;
+  if (entry.url) URL.revokeObjectURL(entry.url);
+  if (entry.cutoutUrl) URL.revokeObjectURL(entry.cutoutUrl);
+}
+
 function removeBgEntry(index) {
   const entry = bgEntries[index];
   if (!entry) return;
-  URL.revokeObjectURL(entry.url);
+  disposeBgEntry(entry);
   bgEntries.splice(index, 1);
   if (bgSelectedIndex >= bgEntries.length) bgSelectedIndex = bgEntries.length - 1;
   else if (index < bgSelectedIndex) bgSelectedIndex -= 1;
@@ -4404,76 +4556,31 @@ function renderBgSources() {
   if (bgSourceCount) bgSourceCount.textContent = `${bgEntries.length}개`;
 }
 
-/* ---- color mask core ---- */
-function bgReferenceColors(data, w, h) {
-  if (bgSettings.references.length) return bgSettings.references;
-  const pts = [
-    [0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1],
-    [w >> 1, 0], [0, h >> 1], [w - 1, h >> 1], [w >> 1, h - 1],
-  ];
-  const out = [];
-  pts.forEach(([x, y]) => {
-    const i = (y * w + x) * 4;
-    if (data[i + 3] < 24) return;
-    out.push([data[i], data[i + 1], data[i + 2]]);
-  });
-  if (!out.length) out.push([data[0], data[1], data[2]]);
-  return out;
-}
-
-function bgComputeMask(data, w, h) {
-  const refs = bgReferenceColors(data, w, h);
-  const thr = bgSettings.tolerance * 2.4;
-  const thrSq = thr * thr;
-  const n = w * h;
-  const candidate = new Uint8Array(n);
-  for (let p = 0, i = 0; p < n; p++, i += 4) {
-    if (data[i + 3] < 24) {
-      candidate[p] = 1;
-      continue;
+/* ---- AI cutout + compositing ---- */
+function ensureCutout(entry) {
+  if (entry.cutoutImage) return Promise.resolve(entry.cutoutImage);
+  if (entry.cutoutPromise) return entry.cutoutPromise;
+  entry.error = null;
+  const run = (async () => {
+    const removeBackground = await loadBgEngine();
+    const blob = await removeBackground(entry.file, {
+      output: { format: "image/png" },
+      progress: bgProgressCb,
+    });
+    entry.cutoutBlob = blob;
+    entry.cutoutUrl = URL.createObjectURL(blob);
+    entry.cutoutImage = await loadImageFromUrl(entry.cutoutUrl);
+    return entry.cutoutImage;
+  })();
+  entry.cutoutPromise = run;
+  run.then(
+    () => {},
+    (error) => {
+      entry.error = error;
+      entry.cutoutPromise = null;
     }
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    for (let c = 0; c < refs.length; c++) {
-      const dr = r - refs[c][0];
-      const dg = g - refs[c][1];
-      const db = b - refs[c][2];
-      if (dr * dr + dg * dg + db * db <= thrSq) {
-        candidate[p] = 1;
-        break;
-      }
-    }
-  }
-  if (bgSettings.mode === "color") return candidate;
-
-  const mask = new Uint8Array(n);
-  const stack = new Int32Array(n);
-  let sp = 0;
-  const push = (p) => {
-    if (candidate[p] && !mask[p]) {
-      mask[p] = 1;
-      stack[sp++] = p;
-    }
-  };
-  for (let x = 0; x < w; x++) {
-    push(x);
-    push((h - 1) * w + x);
-  }
-  for (let y = 0; y < h; y++) {
-    push(y * w);
-    push(y * w + w - 1);
-  }
-  while (sp > 0) {
-    const p = stack[--sp];
-    const x = p % w;
-    const y = (p / w) | 0;
-    if (x > 0) push(p - 1);
-    if (x < w - 1) push(p + 1);
-    if (y > 0) push(p - w);
-    if (y < h - 1) push(p + w);
-  }
-  return mask;
+  );
+  return run;
 }
 
 function bgBoxBlur(src, w, h, r) {
@@ -4501,56 +4608,54 @@ function bgBoxBlur(src, w, h, r) {
   }
 }
 
-function bgRenderOutput(data, w, h, feather) {
-  const mask = bgComputeMask(data, w, h);
-  const n = w * h;
-  const alpha = new Float32Array(n);
-  for (let p = 0; p < n; p++) alpha[p] = mask[p] ? 0 : 255;
-  bgBoxBlur(alpha, w, h, Math.round(feather));
-  const out = new ImageData(w, h);
-  const o = out.data;
-  const solid = bgSettings.fill !== "transparent";
-  let fr = 255;
-  let fg = 255;
-  let fb = 255;
-  if (bgSettings.fill === "custom") {
-    const hex = bgSettings.fillColor.replace("#", "");
-    fr = parseInt(hex.slice(0, 2), 16) || 0;
-    fg = parseInt(hex.slice(2, 4), 16) || 0;
-    fb = parseInt(hex.slice(4, 6), 16) || 0;
-  }
-  for (let p = 0, i = 0; p < n; p++, i += 4) {
-    const fa = (alpha[p] * data[i + 3]) / 255;
-    if (solid) {
-      const a = fa / 255;
-      o[i] = Math.round(data[i] * a + fr * (1 - a));
-      o[i + 1] = Math.round(data[i + 1] * a + fg * (1 - a));
-      o[i + 2] = Math.round(data[i + 2] * a + fb * (1 - a));
-      o[i + 3] = 255;
-    } else {
-      o[i] = data[i];
-      o[i + 1] = data[i + 1];
-      o[i + 2] = data[i + 2];
-      o[i + 3] = Math.round(fa);
-    }
-  }
-  return out;
+function bgFeatherRadius(longSide) {
+  return Math.round((bgSettings.feather * longSide) / 1000);
 }
 
-function getBgProc(entry) {
-  if (entry.proc) return entry.proc;
-  const iw = entry.image.naturalWidth;
-  const ih = entry.image.naturalHeight;
-  const scale = Math.min(1, BG_PREVIEW_MAX / Math.max(iw, ih));
-  const w = Math.max(1, Math.round(iw * scale));
-  const h = Math.max(1, Math.round(ih * scale));
+function bgFillRGB() {
+  if (bgSettings.fill === "white") return [255, 255, 255];
+  if (bgSettings.fill === "custom") {
+    const hex = (bgSettings.fillColor || "#ffffff").replace("#", "");
+    return [
+      parseInt(hex.slice(0, 2), 16) || 0,
+      parseInt(hex.slice(2, 4), 16) || 0,
+      parseInt(hex.slice(4, 6), 16) || 0,
+    ];
+  }
+  return null;
+}
+
+function compositeCutout(image, targetW, targetH) {
   const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  context.drawImage(entry.image, 0, 0, w, h);
-  entry.proc = { w, h, scale, data: context.getImageData(0, 0, w, h).data };
-  return entry.proc;
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const context = canvas.getContext("2d", { willReadFrequently: bgSettings.feather > 0 });
+  context.drawImage(image, 0, 0, targetW, targetH);
+
+  const radius = bgFeatherRadius(Math.max(targetW, targetH));
+  if (radius > 0) {
+    const id = context.getImageData(0, 0, targetW, targetH);
+    const d = id.data;
+    const n = targetW * targetH;
+    const a = new Float32Array(n);
+    for (let p = 0, i = 3; p < n; p++, i += 4) a[p] = d[i];
+    bgBoxBlur(a, targetW, targetH, radius);
+    for (let p = 0, i = 3; p < n; p++, i += 4) d[i] = a[p];
+    context.putImageData(id, 0, 0);
+  }
+
+  const fill = bgFillRGB();
+  if (fill) {
+    const filled = document.createElement("canvas");
+    filled.width = targetW;
+    filled.height = targetH;
+    const fctx = filled.getContext("2d");
+    fctx.fillStyle = `rgb(${fill[0]}, ${fill[1]}, ${fill[2]})`;
+    fctx.fillRect(0, 0, targetW, targetH);
+    fctx.drawImage(canvas, 0, 0);
+    return filled;
+  }
+  return canvas;
 }
 
 function scheduleBgPreview() {
@@ -4561,9 +4666,24 @@ function scheduleBgPreview() {
   });
 }
 
+function requestBgPreviewProcess(entry) {
+  showBgProcessing(true, "AI가 누끼 따는 중…");
+  setBgStatus(`${entry.originalName} 누끼 따는 중…`);
+  ensureCutout(entry).then(
+    () => {
+      if (bgEntries[bgSelectedIndex] === entry) setBgStatus("누끼 완료 · 채우기·다듬기로 마무리하세요");
+      renderBgSources();
+      scheduleBgPreview();
+    },
+    () => {
+      if (bgEntries[bgSelectedIndex] === entry) setBgStatus("누끼 처리 실패 · 인터넷 연결을 확인해 주세요");
+      scheduleBgPreview();
+    }
+  );
+}
+
 function drawBgPreview() {
   if (!bgPreviewCanvas || !bgPreviewWrap) return;
-  const entry = bgEntries[bgSelectedIndex];
   const context = bgPreviewCanvas.getContext("2d");
   const rect = bgPreviewWrap.getBoundingClientRect();
   const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -4573,148 +4693,76 @@ function drawBgPreview() {
   if (bgPreviewCanvas.height !== ch) bgPreviewCanvas.height = ch;
   context.clearRect(0, 0, cw, ch);
   bgView.dpr = dpr;
+
+  const entry = bgEntries[bgSelectedIndex];
   if (!entry) {
     if (bgPreviewEmpty) bgPreviewEmpty.classList.remove("is-hidden");
     if (bgPreviewName) bgPreviewName.textContent = "선택된 이미지 없음";
+    showBgProcessing(false);
+    showBgConsent(false);
     return;
   }
   if (bgPreviewEmpty) bgPreviewEmpty.classList.add("is-hidden");
   if (bgPreviewName) bgPreviewName.textContent = entry.originalName;
-  const proc = getBgProc(entry);
-  const featherPreview = bgSettings.feather;
-  const out = bgRenderOutput(proc.data, proc.w, proc.h, featherPreview);
-  const off = document.createElement("canvas");
-  off.width = proc.w;
-  off.height = proc.h;
-  off.getContext("2d").putImageData(out, 0, 0);
-  const scale = Math.min(cw / proc.w, ch / proc.h);
-  const dw = proc.w * scale;
-  const dh = proc.h * scale;
-  const dx = (cw - dw) / 2;
-  const dy = (ch - dh) / 2;
-  bgView.scale = scale;
-  bgView.dx = dx;
-  bgView.dy = dy;
-  bgView.procW = proc.w;
-  bgView.procH = proc.h;
-  context.imageSmoothingEnabled = true;
-  context.drawImage(off, dx, dy, dw, dh);
-}
 
-function bgPickColorAt(clientX, clientY) {
-  const entry = bgEntries[bgSelectedIndex];
-  if (!entry || !entry.proc) return;
-  const rect = bgPreviewCanvas.getBoundingClientRect();
-  const bx = (clientX - rect.left) * bgView.dpr;
-  const by = (clientY - rect.top) * bgView.dpr;
-  const px = Math.floor((bx - bgView.dx) / bgView.scale);
-  const py = Math.floor((by - bgView.dy) / bgView.scale);
-  if (px < 0 || py < 0 || px >= bgView.procW || py >= bgView.procH) return;
-  const data = entry.proc.data;
-  const i = (py * bgView.procW + px) * 4;
-  const color = [data[i], data[i + 1], data[i + 2]];
-  const exists = bgSettings.references.some((c) => c[0] === color[0] && c[1] === color[1] && c[2] === color[2]);
-  if (!exists) bgSettings.references.push(color);
-  renderBgChips();
-  scheduleBgPreview();
-  setBgStatus(`지울 색 추가됨 · rgb(${color[0]}, ${color[1]}, ${color[2]})`);
-}
+  const processing = !entry.cutoutImage && !!entry.cutoutPromise;
+  showBgProcessing(processing, "AI가 누끼 따는 중…");
 
-function renderBgChips() {
-  if (!bgColorChips) return;
-  bgColorChips.innerHTML = "";
-  if (!bgSettings.references.length) {
-    const hint = document.createElement("span");
-    hint.className = "bg-chip-empty";
-    hint.textContent = "자동 (모서리 색)";
-    bgColorChips.append(hint);
+  if (entry.cutoutImage) {
+    showBgConsent(false);
+    const iw = entry.cutoutImage.naturalWidth;
+    const ih = entry.cutoutImage.naturalHeight;
+    const scale = Math.min(cw / iw, ch / ih);
+    const dw = Math.max(1, Math.round(iw * scale));
+    const dh = Math.max(1, Math.round(ih * scale));
+    const composed = compositeCutout(entry.cutoutImage, dw, dh);
+    context.drawImage(composed, Math.round((cw - dw) / 2), Math.round((ch - dh) / 2));
     return;
   }
-  bgSettings.references.forEach((color, index) => {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "bg-chip";
-    chip.title = "이 색 빼기";
-    chip.style.setProperty("--chip", `rgb(${color[0]}, ${color[1]}, ${color[2]})`);
-    chip.innerHTML = `<span class="bg-chip-dot"></span><span class="bg-chip-x">×</span>`;
-    chip.addEventListener("click", () => {
-      bgSettings.references.splice(index, 1);
-      renderBgChips();
-      scheduleBgPreview();
-    });
-    bgColorChips.append(chip);
-  });
-}
 
-function bgAutoDetect() {
-  const entry = bgEntries[bgSelectedIndex];
-  if (!entry) {
-    setBgStatus("먼저 이미지를 선택하세요");
+  const im = entry.image;
+  const scale = Math.min(cw / im.naturalWidth, ch / im.naturalHeight);
+  const dw = im.naturalWidth * scale;
+  const dh = im.naturalHeight * scale;
+  context.globalAlpha = 0.4;
+  context.drawImage(im, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+  context.globalAlpha = 1;
+
+  if (processing || entry.error) {
+    showBgConsent(false);
     return;
   }
-  const proc = getBgProc(entry);
-  const prev = bgSettings.references;
-  bgSettings.references = [];
-  const auto = bgReferenceColors(proc.data, proc.w, proc.h);
-  const seen = new Set();
-  bgSettings.references = [];
-  auto.forEach((color) => {
-    const key = color.join(",");
-    if (!seen.has(key)) {
-      seen.add(key);
-      bgSettings.references.push(color.slice());
-    }
-  });
-  if (!bgSettings.references.length) bgSettings.references = prev;
-  renderBgChips();
-  scheduleBgPreview();
-  setBgStatus("모서리 색을 지울 색으로 지정했어요");
-}
-
-function resetBgSettings() {
-  bgSettings.references = [];
-  bgSettings.tolerance = 32;
-  bgSettings.feather = 2;
-  if (bgTolerance) bgTolerance.value = "32";
-  if (bgFeather) bgFeather.value = "2";
-  syncBgSliderLabels();
-  renderBgChips();
-  scheduleBgPreview();
-  setBgStatus("설정을 초기화했어요");
+  // Needs a cutout: only download/process after the user has agreed once.
+  if (bgConsented) {
+    showBgConsent(false);
+    requestBgPreviewProcess(entry);
+  } else {
+    showBgConsent(true);
+  }
 }
 
 function syncBgSliderLabels() {
-  if (bgToleranceValue) bgToleranceValue.textContent = `${bgSettings.tolerance}`;
-  if (bgFeatherValue) bgFeatherValue.textContent = `${bgSettings.feather}px`;
+  if (bgFeatherValue) bgFeatherValue.textContent = `${bgSettings.feather}`;
+}
+
+function resetBgSettings() {
+  bgSettings.fill = "transparent";
+  bgSettings.feather = 1;
+  if (bgFeather) bgFeather.value = "1";
+  bgFillSeg.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("is-active", b.dataset.bgfill === "transparent"));
+  if (bgFillColorLine) bgFillColorLine.hidden = true;
+  syncBgSliderLabels();
+  scheduleBgPreview();
+  setBgStatus("설정을 초기화했어요");
 }
 
 function syncBgControls() {
   const has = bgEntries.length > 0;
   if (bgApplyOne) bgApplyOne.disabled = !has || bgRunning;
-  if (bgApplyAll) bgApplyAll.disabled = bgEntries.length < 1 || bgRunning;
+  if (bgApplyAll) bgApplyAll.disabled = !has || bgRunning;
   const hasResults = bgResults.length > 0;
   if (bgDownloadAll) bgDownloadAll.disabled = !hasResults || bgRunning;
   if (bgClearResults) bgClearResults.disabled = !hasResults || bgRunning;
-}
-
-async function processBgEntryFullRes(entry) {
-  const iw = entry.image.naturalWidth;
-  const ih = entry.image.naturalHeight;
-  const canvas = document.createElement("canvas");
-  canvas.width = iw;
-  canvas.height = ih;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  context.drawImage(entry.image, 0, 0);
-  const data = context.getImageData(0, 0, iw, ih).data;
-  const proc = getBgProc(entry);
-  const featherFull = bgSettings.feather / (proc.scale || 1);
-  const out = bgRenderOutput(data, iw, ih, featherFull);
-  const outCanvas = document.createElement("canvas");
-  outCanvas.width = iw;
-  outCanvas.height = ih;
-  outCanvas.getContext("2d").putImageData(out, 0, 0);
-  const blob = await canvasToBlob(outCanvas, "image/png");
-  return { blob, width: iw, height: ih };
 }
 
 function bgOutName(entry) {
@@ -4738,16 +4786,18 @@ async function runBgRemove(entriesToProcess) {
   let failed = 0;
   for (const entry of entriesToProcess) {
     try {
-      setBgStatus(`${entry.originalName} 처리 중…`);
-      await new Promise((resolve) => requestAnimationFrame(resolve));
-      const result = await processBgEntryFullRes(entry);
+      setBgStatus(`${entry.originalName} 누끼 따는 중…`);
+      showBgProcessing(bgEntries[bgSelectedIndex] === entry, "AI가 누끼 따는 중…");
+      const image = await ensureCutout(entry);
+      const canvas = compositeCutout(image, image.naturalWidth, image.naturalHeight);
+      const blob = await canvasToBlob(canvas, "image/png");
       const item = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        blob: result.blob,
-        url: URL.createObjectURL(result.blob),
+        blob,
+        url: URL.createObjectURL(blob),
         file: bgOutName(entry),
-        width: result.width,
-        height: result.height,
+        width: canvas.width,
+        height: canvas.height,
         date: Date.now(),
       };
       bgResults.push(item);
@@ -4765,9 +4815,11 @@ async function runBgRemove(entriesToProcess) {
   }
   bgRunning = false;
   if (bgProgress) bgProgress.hidden = true;
+  showBgProcessing(false);
   renderBgSources();
   syncBgControls();
-  setBgStatus(failed ? `배경 지우기 완료 · ${completed}개 (실패 ${failed}개)` : `배경 지우기 완료 · ${completed}개`);
+  scheduleBgPreview();
+  setBgStatus(failed ? `누끼 완료 · ${completed}개 (실패 ${failed}개)` : `누끼 완료 · ${completed}개`);
 }
 
 function buildBgResultCard(item) {
@@ -4858,19 +4910,6 @@ if (bgSourceInput) {
   });
   wireBatchDropzone(bgSourceDropzone, addBgFiles);
 
-  bgModeSeg.querySelectorAll(".seg-btn").forEach((button) => {
-    button.addEventListener("click", () => {
-      bgSettings.mode = button.dataset.bgmode;
-      bgModeSeg.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("is-active", b === button));
-      if (bgModeNote) {
-        bgModeNote.textContent = bgSettings.mode === "edge"
-          ? "가장자리와 연결된 배경만 지워, 안쪽 무늬는 남겨요."
-          : "화면 전체에서 지울 색과 비슷한 부분을 모두 지워요.";
-      }
-      scheduleBgPreview();
-    });
-  });
-
   bgFillSeg.querySelectorAll(".seg-btn").forEach((button) => {
     button.addEventListener("click", () => {
       bgSettings.fill = button.dataset.bgfill;
@@ -4887,30 +4926,25 @@ if (bgSourceInput) {
     });
   }
 
-  bgTolerance.addEventListener("input", () => {
-    bgSettings.tolerance = clampNumber(bgTolerance.value, 1, 100, 32);
-    syncBgSliderLabels();
-    scheduleBgPreview();
-  });
   bgFeather.addEventListener("input", () => {
-    bgSettings.feather = clampNumber(bgFeather.value, 0, 8, 2);
+    bgSettings.feather = clampNumber(bgFeather.value, 0, 6, 1);
     syncBgSliderLabels();
     scheduleBgPreview();
   });
 
-  bgAutoBtn.addEventListener("click", bgAutoDetect);
   bgResetSettings.addEventListener("click", resetBgSettings);
   bgApplyOne.addEventListener("click", () => {
     const entry = bgEntries[bgSelectedIndex];
-    if (entry) runBgRemove([entry]);
+    if (entry) requestBgConsent(() => runBgRemove([entry]));
   });
-  bgApplyAll.addEventListener("click", () => runBgRemove(bgEntries.slice()));
+  bgApplyAll.addEventListener("click", () => {
+    if (bgEntries.length) requestBgConsent(() => runBgRemove(bgEntries.slice()));
+  });
   bgDownloadAll.addEventListener("click", downloadBgZip);
   bgClearResults.addEventListener("click", clearBgResults);
-
-  bgPreviewCanvas.addEventListener("click", (event) => {
-    if (!bgRunning) bgPickColorAt(event.clientX, event.clientY);
-  });
+  if (bgConsentAgree) bgConsentAgree.addEventListener("click", agreeBgConsent);
+  if (bgConsentCancel) bgConsentCancel.addEventListener("click", cancelBgConsent);
+  if (bgClearCache) bgClearCache.addEventListener("click", clearBgCache);
 
   window.addEventListener("resize", () => {
     if (currentViewName === "bgremove") scheduleBgPreview();
@@ -5018,8 +5052,8 @@ const HOWTO = {
     title: "배경 지우기",
     steps: [
       "배경을 지울 이미지를 올려요.",
-      "미리보기에서 배경을 클릭하거나 ‘모서리 자동’으로 지울 색을 정하고, 허용 범위를 조절해요.",
-      "‘이 사진 적용’ 또는 ‘모든 사진 적용’으로 투명 PNG를 만들어요.",
+      "AI가 자동으로 피사체를 인식해 배경을 지워요. (처음 한 번은 AI 모델을 내려받아요)",
+      "배경 채우기·가장자리 다듬기로 마무리하고 ‘이 사진 적용’ 또는 ‘모든 사진 적용’으로 저장해요.",
     ],
     svg: `<svg viewBox="0 0 320 190" class="ho-svg" role="img" aria-label="배경 지우기 미리보기">
       ${HOWTO_PHOTO_DEFS}
@@ -5121,8 +5155,12 @@ document.addEventListener("keydown", (event) => {
   renderBatchCropSources();
   renderBatchCropResults();
   syncBatchCropControls();
+  try {
+    bgConsented = localStorage.getItem(BG_CONSENT_KEY) === "1";
+  } catch (error) {
+    bgConsented = false;
+  }
   renderBgSources();
-  renderBgChips();
   renderBgResults();
   syncBgSliderLabels();
   syncBgControls();

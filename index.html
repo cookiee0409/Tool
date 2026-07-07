@@ -200,8 +200,8 @@
                 </svg>
               </div>
               <div class="home-copy">
-                <h2>배경 지우기 <span class="home-new">NEW</span></h2>
-                <p>클릭 한 번으로 배경을 투명하게 지우고 PNG로 저장해요.</p>
+                <h2>배경 지우기 <span class="home-new">AI</span></h2>
+                <p>AI가 피사체만 남기고 배경을 자동으로 누끼 따 투명 PNG로 저장해요.</p>
               </div>
               <span class="home-go" aria-hidden="true">→</span>
             </button>
@@ -800,7 +800,7 @@
           <header class="topbar">
             <div class="page-head">
               <h1 id="bgremove-title">배경 지우기</h1>
-              <p class="subtitle">배경을 클릭해 투명하게 지우고 PNG로 저장해요</p>
+              <p class="subtitle">AI가 피사체만 남기고 배경을 깔끔하게 누끼 따요 ✂️</p>
             </div>
             <div class="status-pill" id="bgStatus" aria-live="polite">이미지를 업로드하세요</div>
           </header>
@@ -820,34 +820,11 @@
             </section>
 
             <section class="control-block bg-controls-block">
-              <div class="block-head"><h2>지우기 설정</h2></div>
-
-              <p class="popup-label">지우는 방식</p>
-              <div class="seg" id="bgModeSeg" role="group" aria-label="지우는 방식">
-                <button type="button" class="seg-btn is-active" data-bgmode="edge">가장자리에서</button>
-                <button type="button" class="seg-btn" data-bgmode="color">비슷한 색 전체</button>
+              <div class="block-head">
+                <h2>누끼 설정</h2>
+                <span id="bgEngineChip" class="bg-engine-chip is-idle">AI 대기 중</span>
               </div>
-              <p class="block-note" id="bgModeNote">가장자리와 연결된 배경만 지워, 안쪽 무늬는 남겨요.</p>
-
-              <div class="bg-colors">
-                <div class="bg-colors-head">
-                  <p class="popup-label">지울 색</p>
-                  <button type="button" class="link-btn" id="bgAutoBtn">모서리 자동</button>
-                </div>
-                <div class="bg-chips" id="bgColorChips"></div>
-                <p class="block-note">미리보기에서 배경을 클릭하면 그 색을 지울 색에 더해요.</p>
-              </div>
-
-              <div class="slider-row">
-                <label for="bgTolerance">허용 범위 <strong id="bgToleranceValue">32</strong></label>
-                <input id="bgTolerance" type="range" min="1" max="100" step="1" value="32" />
-                <p class="block-note">높일수록 비슷한 색까지 더 넓게 지워요.</p>
-              </div>
-
-              <div class="slider-row">
-                <label for="bgFeather">가장자리 다듬기 <strong id="bgFeatherValue">2px</strong></label>
-                <input id="bgFeather" type="range" min="0" max="8" step="1" value="2" />
-              </div>
+              <p class="block-note">AI가 사진 속 피사체(인물·제품 등)를 자동으로 인식해 배경만 지워요. 처음 한 번은 AI 모델(약 30~40MB)을 내려받아 잠시 걸릴 수 있어요.</p>
 
               <p class="popup-label">배경 채우기</p>
               <div class="seg" id="bgFillSeg" role="group" aria-label="배경 채우기">
@@ -859,6 +836,17 @@
                 채울 색
                 <input id="bgFillColor" type="color" value="#ffffff" />
               </label>
+
+              <div class="slider-row">
+                <label for="bgFeather">가장자리 다듬기 <strong id="bgFeatherValue">1</strong></label>
+                <input id="bgFeather" type="range" min="0" max="6" step="1" value="1" />
+                <p class="block-note">피사체 경계를 살짝 부드럽게 다듬어요.</p>
+              </div>
+
+              <div class="bg-cache-row">
+                <button type="button" class="link-btn" id="bgClearCache">AI 모델 캐시 삭제</button>
+                <span class="block-sub">내려받은 모델을 지워 저장 공간을 비워요</span>
+              </div>
             </section>
           </div>
 
@@ -870,10 +858,24 @@
             <div class="batch-preview-wrap bg-preview-wrap">
               <canvas id="bgPreviewCanvas" width="900" height="480"></canvas>
               <div class="stage-empty" id="bgPreviewEmpty">이미지를 업로드하세요</div>
+              <div class="bg-processing" id="bgProcessing" hidden>
+                <span class="bg-spinner" aria-hidden="true"></span>
+                <span id="bgProcessingText">AI가 누끼 따는 중…</span>
+              </div>
+              <div class="bg-consent" id="bgConsent" hidden>
+                <div class="bg-consent-card" role="dialog" aria-labelledby="bgConsentTitle">
+                  <strong id="bgConsentTitle">AI 배경 지우기 안내</strong>
+                  <p>배경 지우기는 처음 사용할 때 AI 모델(약 30~40MB)을 인터넷에서 한 번 내려받아요. 이후에는 캐시되어 빠르게 동작하고, 모든 처리는 이 브라우저 안에서만 이뤄집니다. 계속할까요?</p>
+                  <div class="bg-consent-actions">
+                    <button type="button" id="bgConsentCancel">취소</button>
+                    <button type="button" class="primary grad" id="bgConsentAgree">동의하고 계속</button>
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="batch-preview-footer">
               <div>
-                <p class="batch-preview-hint">배경 부분을 클릭해 지울 색을 더하고, 슬라이더로 범위를 조절하세요.</p>
+                <p class="batch-preview-hint">이미지를 고르면 AI가 자동으로 배경을 지워요. 채우기·다듬기로 마무리한 뒤 적용하세요.</p>
                 <div class="batch-progress" id="bgProgress" hidden>
                   <span id="bgProgressText">0 / 0</span>
                   <progress id="bgProgressBar" value="0" max="1"></progress>
