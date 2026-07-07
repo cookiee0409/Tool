@@ -2588,18 +2588,27 @@ p {
 
 .bg-processing {
   position: absolute;
-  inset: auto;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px;
+  padding: 11px 18px;
   border-radius: var(--r-pill);
-  background: rgba(20, 22, 40, 0.72);
+  background: rgba(20, 22, 40, 0.82);
   color: #fff;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   backdrop-filter: blur(2px);
   z-index: 2;
+}
+
+/* The hidden attribute must beat the display rules above, like .batch-progress[hidden]. */
+.bg-processing[hidden],
+.bg-consent[hidden],
+.bg-fill-color-line[hidden] {
+  display: none;
 }
 
 .bg-spinner {

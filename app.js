@@ -4339,8 +4339,13 @@ function agreeBgConsent() {
   const action = bgPendingConsentAction;
   bgPendingConsentAction = null;
   loadBgEngine().catch(() => {});
-  if (action) action();
-  else scheduleBgPreview();
+  if (action) {
+    action();
+    return;
+  }
+  const entry = bgEntries[bgSelectedIndex];
+  if (entry && !entry.cutoutImage && !entry.cutoutPromise) requestBgPreviewProcess(entry);
+  scheduleBgPreview();
 }
 
 function cancelBgConsent() {
@@ -4401,7 +4406,13 @@ function bgProgressCb(key, current, total) {
   if (typeof key !== "string") return;
   if (key.startsWith("fetch") && typeof current === "number" && typeof total === "number" && total > 0) {
     const pct = Math.min(100, Math.round((current / total) * 100));
-    setBgEngineChip(`AI 모델 내려받는 중 ${pct}%`, "loading");
+    if (pct >= 100) {
+      setBgEngineChip("AI 준비 중…", "loading");
+      showBgProcessing(true, "AI 준비 중… 잠시만요");
+    } else {
+      setBgEngineChip(`AI 모델 ${pct}%`, "loading");
+      showBgProcessing(true, `AI 모델 내려받는 중… ${pct}%`);
+    }
   }
 }
 
@@ -4564,6 +4575,9 @@ function ensureCutout(entry) {
   const run = (async () => {
     const removeBackground = await loadBgEngine();
     const blob = await removeBackground(entry.file, {
+      // quint8 is the smallest weight file (~11MB) so the first-use download is
+      // several times faster than the default isnet_fp16 (~44MB).
+      model: "isnet_quint8",
       output: { format: "image/png" },
       progress: bgProgressCb,
     });
