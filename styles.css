@@ -1311,12 +1311,17 @@ p {
 }
 
 #batchPreviewCanvas,
-#batchCropPreviewCanvas {
+#batchCropPreviewCanvas,
+#bgPreviewCanvas {
   display: block;
   width: 100%;
   height: 100%;
   cursor: default;
   touch-action: none;
+}
+
+#bgPreviewCanvas {
+  cursor: crosshair;
 }
 
 .batch-preview-hint {
@@ -2330,4 +2335,226 @@ p {
 
 @media (prefers-reduced-motion: reduce) {
   .ho-svg * { animation: none !important; }
+}
+
+/* ============================================================
+   Home (dashboard) view
+   ============================================================ */
+.home-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.home-card {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.home-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+}
+
+.home-card:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.home-card--wide {
+  grid-column: 1 / -1;
+}
+
+.home-art {
+  width: 132px;
+  height: 88px;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--grad-soft);
+  display: grid;
+  place-items: center;
+}
+
+.home-art--check {
+  background-color: var(--stage);
+  background-image:
+    linear-gradient(45deg, var(--check) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--check) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--check) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--check) 75%);
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
+}
+
+.home-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.home-copy h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.home-copy p {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.home-new {
+  padding: 2px 7px;
+  border-radius: var(--r-pill);
+  background: var(--grad);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.home-go {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-faint);
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.home-card:hover .home-go {
+  transform: translateX(3px);
+  color: var(--accent);
+}
+
+@media (max-width: 760px) {
+  .home-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ============================================================
+   Background remove view
+   ============================================================ */
+.bg-controls-block .slider-row {
+  gap: 6px;
+}
+
+.bg-colors {
+  display: grid;
+  gap: 8px;
+}
+
+.bg-colors-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bg-colors-head .popup-label {
+  margin: 0;
+}
+
+.bg-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 30px;
+  align-items: center;
+}
+
+.bg-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.bg-chip:hover {
+  border-color: var(--accent);
+}
+
+.bg-chip-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--chip, #ccc);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+.bg-chip-x {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.bg-chip-empty {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.bg-fill-color-line {
+  align-items: center;
+}
+
+.bg-fill-color-line input[type="color"] {
+  width: 40px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: none;
+  cursor: pointer;
+}
+
+.bg-done-badge {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: var(--r-pill);
+  background: var(--success);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  z-index: 1;
+}
+
+.bg-tile-img {
+  background-color: var(--stage);
+  background-image:
+    linear-gradient(45deg, var(--check) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--check) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--check) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--check) 75%);
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
 }

@@ -49,10 +49,12 @@ const fitBtn = document.getElementById("fitBtn");
 const zoomLabel = document.getElementById("zoomLabel");
 const navItems = document.querySelectorAll(".nav-item");
 const views = {
+  home: document.getElementById("view-home"),
   edit: document.getElementById("view-edit"),
   batchcrop: document.getElementById("view-batchcrop"),
   batch: document.getElementById("view-batch"),
   rename: document.getElementById("view-rename"),
+  bgremove: document.getElementById("view-bgremove"),
   works: document.getElementById("view-works"),
   settings: document.getElementById("view-settings"),
 };
@@ -3597,23 +3599,30 @@ async function loadWorksFromDb() {
 /* ============================================================
    View switching + theme
    ============================================================ */
-let currentViewName = "edit";
+let currentViewName = "home";
 
 function setView(name, navButton) {
   Object.entries(views).forEach(([key, element]) => {
     if (element) element.hidden = key !== name;
   });
-  navItems.forEach((button) => button.classList.remove("is-active"));
+  navItems.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.view === name);
+  });
   if (navButton) navButton.classList.add("is-active");
   currentViewName = name;
   updateHowtoFab();
   if (name === "edit") requestAnimationFrame(resizeCanvasToStage);
   if (name === "batch") requestAnimationFrame(drawBatchPreview);
   if (name === "batchcrop") requestAnimationFrame(drawBatchCropPreview);
+  if (name === "bgremove") requestAnimationFrame(drawBgPreview);
 }
 
 navItems.forEach((button) => {
   button.addEventListener("click", () => setView(button.dataset.view, button));
+});
+
+document.querySelectorAll(".home-card[data-goto]").forEach((card) => {
+  card.addEventListener("click", () => setView(card.dataset.goto));
 });
 
 function applyTheme(name) {
@@ -4233,6 +4242,682 @@ if (compressInput) {
 }
 
 /* ============================================================
+   배경 지우기 (Background remove) — 색 기반 / 가장자리 채우기
+   ============================================================ */
+const bgSourceInput = document.getElementById("bgSourceInput");
+const bgSourceDropzone = document.getElementById("bgSourceDropzone");
+const bgSourceGrid = document.getElementById("bgSourceGrid");
+const bgSourceCount = document.getElementById("bgSourceCount");
+const bgStatus = document.getElementById("bgStatus");
+const bgModeSeg = document.getElementById("bgModeSeg");
+const bgModeNote = document.getElementById("bgModeNote");
+const bgColorChips = document.getElementById("bgColorChips");
+const bgAutoBtn = document.getElementById("bgAutoBtn");
+const bgTolerance = document.getElementById("bgTolerance");
+const bgToleranceValue = document.getElementById("bgToleranceValue");
+const bgFeather = document.getElementById("bgFeather");
+const bgFeatherValue = document.getElementById("bgFeatherValue");
+const bgFillSeg = document.getElementById("bgFillSeg");
+const bgFillColorLine = document.getElementById("bgFillColorLine");
+const bgFillColor = document.getElementById("bgFillColor");
+const bgPreviewCanvas = document.getElementById("bgPreviewCanvas");
+const bgPreviewWrap = bgPreviewCanvas ? bgPreviewCanvas.parentElement : null;
+const bgPreviewEmpty = document.getElementById("bgPreviewEmpty");
+const bgPreviewName = document.getElementById("bgPreviewName");
+const bgProgress = document.getElementById("bgProgress");
+const bgProgressText = document.getElementById("bgProgressText");
+const bgProgressBar = document.getElementById("bgProgressBar");
+const bgResetSettings = document.getElementById("bgResetSettings");
+const bgApplyOne = document.getElementById("bgApplyOne");
+const bgApplyAll = document.getElementById("bgApplyAll");
+const bgResultGrid = document.getElementById("bgResultGrid");
+const bgResultEmpty = document.getElementById("bgResultEmpty");
+const bgResultCount = document.getElementById("bgResultCount");
+const bgResultHint = document.getElementById("bgResultHint");
+const bgPrefix = document.getElementById("bgPrefix");
+const bgAutoDownload = document.getElementById("bgAutoDownload");
+const bgDownloadAll = document.getElementById("bgDownloadAll");
+const bgClearResults = document.getElementById("bgClearResults");
+
+const BG_PREVIEW_MAX = 1024;
+const bgSettings = { mode: "edge", references: [], tolerance: 32, feather: 2, fill: "transparent", fillColor: "#ffffff" };
+let bgEntries = [];
+let bgSelectedIndex = -1;
+let bgResults = [];
+let bgRunning = false;
+let bgPreviewRaf = 0;
+const bgView = { scale: 1, dx: 0, dy: 0, dpr: 1, procW: 0, procH: 0 };
+
+function setBgStatus(message) {
+  if (bgStatus) bgStatus.textContent = message;
+}
+
+function loadBgImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      const { base, ext } = splitFileName(file.name);
+      resolve({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        file,
+        originalName: file.name,
+        base,
+        ext,
+        url,
+        image,
+        proc: null,
+        done: false,
+      });
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("image load failed"));
+    };
+    image.src = url;
+  });
+}
+
+async function addBgFiles(fileList) {
+  if (bgRunning) return;
+  const available = Math.max(0, 50 - bgEntries.length);
+  const files = Array.from(fileList || []).filter((file) => file.type.startsWith("image/"));
+  const selected = files.slice(0, available);
+  const excluded = Math.max(0, files.length - selected.length);
+  if (!selected.length) {
+    setBgStatus(available ? "사용할 수 있는 이미지 파일이 없어요" : "이미지는 최대 50개까지 올릴 수 있어요");
+    return;
+  }
+  setBgStatus(`${selected.length}개 이미지를 불러오는 중…`);
+  const loaded = await Promise.allSettled(selected.map(loadBgImage));
+  const firstNew = bgEntries.length;
+  loaded.forEach((result) => {
+    if (result.status === "fulfilled") bgEntries.push(result.value);
+  });
+  if (bgSelectedIndex < 0 && bgEntries.length) bgSelectedIndex = firstNew;
+  renderBgSources();
+  scheduleBgPreview();
+  syncBgControls();
+  setBgStatus(excluded ? `${bgEntries.length}개 준비됨 · 초과분 ${excluded}개 제외` : `${bgEntries.length}개 이미지 준비됨`);
+}
+
+function removeBgEntry(index) {
+  const entry = bgEntries[index];
+  if (!entry) return;
+  URL.revokeObjectURL(entry.url);
+  bgEntries.splice(index, 1);
+  if (bgSelectedIndex >= bgEntries.length) bgSelectedIndex = bgEntries.length - 1;
+  else if (index < bgSelectedIndex) bgSelectedIndex -= 1;
+  renderBgSources();
+  scheduleBgPreview();
+  syncBgControls();
+  setBgStatus(bgEntries.length ? `${bgEntries.length}개 이미지` : "이미지를 업로드하세요");
+}
+
+function renderBgSources() {
+  if (!bgSourceGrid) return;
+  bgSourceGrid.innerHTML = "";
+  bgSourceGrid.classList.toggle("is-list", bgEntries.length > 9);
+  bgEntries.forEach((entry, index) => {
+    const card = document.createElement("article");
+    card.className = `batch-file-card bg-file-card${index === bgSelectedIndex ? " is-active" : ""}`;
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.setAttribute("aria-label", `${entry.originalName} 미리보기`);
+    const image = document.createElement("img");
+    image.src = entry.url;
+    image.alt = "";
+    const name = document.createElement("span");
+    name.textContent = entry.originalName;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "batch-file-remove";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `${entry.originalName} 제거`);
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!bgRunning) removeBgEntry(index);
+    });
+    const select = () => {
+      if (bgRunning) return;
+      bgSelectedIndex = index;
+      renderBgSources();
+      scheduleBgPreview();
+    };
+    card.addEventListener("click", select);
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        select();
+      }
+    });
+    if (entry.done) {
+      const badge = document.createElement("span");
+      badge.className = "bg-done-badge";
+      badge.textContent = "✓";
+      badge.title = "적용됨";
+      card.append(badge);
+    }
+    card.append(image, name, remove);
+    bgSourceGrid.append(card);
+  });
+  if (bgSourceCount) bgSourceCount.textContent = `${bgEntries.length}개`;
+}
+
+/* ---- color mask core ---- */
+function bgReferenceColors(data, w, h) {
+  if (bgSettings.references.length) return bgSettings.references;
+  const pts = [
+    [0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1],
+    [w >> 1, 0], [0, h >> 1], [w - 1, h >> 1], [w >> 1, h - 1],
+  ];
+  const out = [];
+  pts.forEach(([x, y]) => {
+    const i = (y * w + x) * 4;
+    if (data[i + 3] < 24) return;
+    out.push([data[i], data[i + 1], data[i + 2]]);
+  });
+  if (!out.length) out.push([data[0], data[1], data[2]]);
+  return out;
+}
+
+function bgComputeMask(data, w, h) {
+  const refs = bgReferenceColors(data, w, h);
+  const thr = bgSettings.tolerance * 2.4;
+  const thrSq = thr * thr;
+  const n = w * h;
+  const candidate = new Uint8Array(n);
+  for (let p = 0, i = 0; p < n; p++, i += 4) {
+    if (data[i + 3] < 24) {
+      candidate[p] = 1;
+      continue;
+    }
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    for (let c = 0; c < refs.length; c++) {
+      const dr = r - refs[c][0];
+      const dg = g - refs[c][1];
+      const db = b - refs[c][2];
+      if (dr * dr + dg * dg + db * db <= thrSq) {
+        candidate[p] = 1;
+        break;
+      }
+    }
+  }
+  if (bgSettings.mode === "color") return candidate;
+
+  const mask = new Uint8Array(n);
+  const stack = new Int32Array(n);
+  let sp = 0;
+  const push = (p) => {
+    if (candidate[p] && !mask[p]) {
+      mask[p] = 1;
+      stack[sp++] = p;
+    }
+  };
+  for (let x = 0; x < w; x++) {
+    push(x);
+    push((h - 1) * w + x);
+  }
+  for (let y = 0; y < h; y++) {
+    push(y * w);
+    push(y * w + w - 1);
+  }
+  while (sp > 0) {
+    const p = stack[--sp];
+    const x = p % w;
+    const y = (p / w) | 0;
+    if (x > 0) push(p - 1);
+    if (x < w - 1) push(p + 1);
+    if (y > 0) push(p - w);
+    if (y < h - 1) push(p + w);
+  }
+  return mask;
+}
+
+function bgBoxBlur(src, w, h, r) {
+  if (r < 1) return;
+  const norm = 1 / (2 * r + 1);
+  const tmp = new Float32Array(src.length);
+  const clampX = (v) => (v < 0 ? 0 : v >= w ? w - 1 : v);
+  const clampY = (v) => (v < 0 ? 0 : v >= h ? h - 1 : v);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    let acc = 0;
+    for (let k = -r; k <= r; k++) acc += src[row + clampX(k)];
+    for (let x = 0; x < w; x++) {
+      tmp[row + x] = acc * norm;
+      acc += src[row + clampX(x + r + 1)] - src[row + clampX(x - r)];
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let acc = 0;
+    for (let k = -r; k <= r; k++) acc += tmp[clampY(k) * w + x];
+    for (let y = 0; y < h; y++) {
+      src[y * w + x] = acc * norm;
+      acc += tmp[clampY(y + r + 1) * w + x] - tmp[clampY(y - r) * w + x];
+    }
+  }
+}
+
+function bgRenderOutput(data, w, h, feather) {
+  const mask = bgComputeMask(data, w, h);
+  const n = w * h;
+  const alpha = new Float32Array(n);
+  for (let p = 0; p < n; p++) alpha[p] = mask[p] ? 0 : 255;
+  bgBoxBlur(alpha, w, h, Math.round(feather));
+  const out = new ImageData(w, h);
+  const o = out.data;
+  const solid = bgSettings.fill !== "transparent";
+  let fr = 255;
+  let fg = 255;
+  let fb = 255;
+  if (bgSettings.fill === "custom") {
+    const hex = bgSettings.fillColor.replace("#", "");
+    fr = parseInt(hex.slice(0, 2), 16) || 0;
+    fg = parseInt(hex.slice(2, 4), 16) || 0;
+    fb = parseInt(hex.slice(4, 6), 16) || 0;
+  }
+  for (let p = 0, i = 0; p < n; p++, i += 4) {
+    const fa = (alpha[p] * data[i + 3]) / 255;
+    if (solid) {
+      const a = fa / 255;
+      o[i] = Math.round(data[i] * a + fr * (1 - a));
+      o[i + 1] = Math.round(data[i + 1] * a + fg * (1 - a));
+      o[i + 2] = Math.round(data[i + 2] * a + fb * (1 - a));
+      o[i + 3] = 255;
+    } else {
+      o[i] = data[i];
+      o[i + 1] = data[i + 1];
+      o[i + 2] = data[i + 2];
+      o[i + 3] = Math.round(fa);
+    }
+  }
+  return out;
+}
+
+function getBgProc(entry) {
+  if (entry.proc) return entry.proc;
+  const iw = entry.image.naturalWidth;
+  const ih = entry.image.naturalHeight;
+  const scale = Math.min(1, BG_PREVIEW_MAX / Math.max(iw, ih));
+  const w = Math.max(1, Math.round(iw * scale));
+  const h = Math.max(1, Math.round(ih * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(entry.image, 0, 0, w, h);
+  entry.proc = { w, h, scale, data: context.getImageData(0, 0, w, h).data };
+  return entry.proc;
+}
+
+function scheduleBgPreview() {
+  if (bgPreviewRaf) return;
+  bgPreviewRaf = requestAnimationFrame(() => {
+    bgPreviewRaf = 0;
+    drawBgPreview();
+  });
+}
+
+function drawBgPreview() {
+  if (!bgPreviewCanvas || !bgPreviewWrap) return;
+  const entry = bgEntries[bgSelectedIndex];
+  const context = bgPreviewCanvas.getContext("2d");
+  const rect = bgPreviewWrap.getBoundingClientRect();
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const cw = Math.max(2, Math.round(rect.width * dpr));
+  const ch = Math.max(2, Math.round(rect.height * dpr));
+  if (bgPreviewCanvas.width !== cw) bgPreviewCanvas.width = cw;
+  if (bgPreviewCanvas.height !== ch) bgPreviewCanvas.height = ch;
+  context.clearRect(0, 0, cw, ch);
+  bgView.dpr = dpr;
+  if (!entry) {
+    if (bgPreviewEmpty) bgPreviewEmpty.classList.remove("is-hidden");
+    if (bgPreviewName) bgPreviewName.textContent = "선택된 이미지 없음";
+    return;
+  }
+  if (bgPreviewEmpty) bgPreviewEmpty.classList.add("is-hidden");
+  if (bgPreviewName) bgPreviewName.textContent = entry.originalName;
+  const proc = getBgProc(entry);
+  const featherPreview = bgSettings.feather;
+  const out = bgRenderOutput(proc.data, proc.w, proc.h, featherPreview);
+  const off = document.createElement("canvas");
+  off.width = proc.w;
+  off.height = proc.h;
+  off.getContext("2d").putImageData(out, 0, 0);
+  const scale = Math.min(cw / proc.w, ch / proc.h);
+  const dw = proc.w * scale;
+  const dh = proc.h * scale;
+  const dx = (cw - dw) / 2;
+  const dy = (ch - dh) / 2;
+  bgView.scale = scale;
+  bgView.dx = dx;
+  bgView.dy = dy;
+  bgView.procW = proc.w;
+  bgView.procH = proc.h;
+  context.imageSmoothingEnabled = true;
+  context.drawImage(off, dx, dy, dw, dh);
+}
+
+function bgPickColorAt(clientX, clientY) {
+  const entry = bgEntries[bgSelectedIndex];
+  if (!entry || !entry.proc) return;
+  const rect = bgPreviewCanvas.getBoundingClientRect();
+  const bx = (clientX - rect.left) * bgView.dpr;
+  const by = (clientY - rect.top) * bgView.dpr;
+  const px = Math.floor((bx - bgView.dx) / bgView.scale);
+  const py = Math.floor((by - bgView.dy) / bgView.scale);
+  if (px < 0 || py < 0 || px >= bgView.procW || py >= bgView.procH) return;
+  const data = entry.proc.data;
+  const i = (py * bgView.procW + px) * 4;
+  const color = [data[i], data[i + 1], data[i + 2]];
+  const exists = bgSettings.references.some((c) => c[0] === color[0] && c[1] === color[1] && c[2] === color[2]);
+  if (!exists) bgSettings.references.push(color);
+  renderBgChips();
+  scheduleBgPreview();
+  setBgStatus(`지울 색 추가됨 · rgb(${color[0]}, ${color[1]}, ${color[2]})`);
+}
+
+function renderBgChips() {
+  if (!bgColorChips) return;
+  bgColorChips.innerHTML = "";
+  if (!bgSettings.references.length) {
+    const hint = document.createElement("span");
+    hint.className = "bg-chip-empty";
+    hint.textContent = "자동 (모서리 색)";
+    bgColorChips.append(hint);
+    return;
+  }
+  bgSettings.references.forEach((color, index) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "bg-chip";
+    chip.title = "이 색 빼기";
+    chip.style.setProperty("--chip", `rgb(${color[0]}, ${color[1]}, ${color[2]})`);
+    chip.innerHTML = `<span class="bg-chip-dot"></span><span class="bg-chip-x">×</span>`;
+    chip.addEventListener("click", () => {
+      bgSettings.references.splice(index, 1);
+      renderBgChips();
+      scheduleBgPreview();
+    });
+    bgColorChips.append(chip);
+  });
+}
+
+function bgAutoDetect() {
+  const entry = bgEntries[bgSelectedIndex];
+  if (!entry) {
+    setBgStatus("먼저 이미지를 선택하세요");
+    return;
+  }
+  const proc = getBgProc(entry);
+  const prev = bgSettings.references;
+  bgSettings.references = [];
+  const auto = bgReferenceColors(proc.data, proc.w, proc.h);
+  const seen = new Set();
+  bgSettings.references = [];
+  auto.forEach((color) => {
+    const key = color.join(",");
+    if (!seen.has(key)) {
+      seen.add(key);
+      bgSettings.references.push(color.slice());
+    }
+  });
+  if (!bgSettings.references.length) bgSettings.references = prev;
+  renderBgChips();
+  scheduleBgPreview();
+  setBgStatus("모서리 색을 지울 색으로 지정했어요");
+}
+
+function resetBgSettings() {
+  bgSettings.references = [];
+  bgSettings.tolerance = 32;
+  bgSettings.feather = 2;
+  if (bgTolerance) bgTolerance.value = "32";
+  if (bgFeather) bgFeather.value = "2";
+  syncBgSliderLabels();
+  renderBgChips();
+  scheduleBgPreview();
+  setBgStatus("설정을 초기화했어요");
+}
+
+function syncBgSliderLabels() {
+  if (bgToleranceValue) bgToleranceValue.textContent = `${bgSettings.tolerance}`;
+  if (bgFeatherValue) bgFeatherValue.textContent = `${bgSettings.feather}px`;
+}
+
+function syncBgControls() {
+  const has = bgEntries.length > 0;
+  if (bgApplyOne) bgApplyOne.disabled = !has || bgRunning;
+  if (bgApplyAll) bgApplyAll.disabled = bgEntries.length < 1 || bgRunning;
+  const hasResults = bgResults.length > 0;
+  if (bgDownloadAll) bgDownloadAll.disabled = !hasResults || bgRunning;
+  if (bgClearResults) bgClearResults.disabled = !hasResults || bgRunning;
+}
+
+async function processBgEntryFullRes(entry) {
+  const iw = entry.image.naturalWidth;
+  const ih = entry.image.naturalHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = iw;
+  canvas.height = ih;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(entry.image, 0, 0);
+  const data = context.getImageData(0, 0, iw, ih).data;
+  const proc = getBgProc(entry);
+  const featherFull = bgSettings.feather / (proc.scale || 1);
+  const out = bgRenderOutput(data, iw, ih, featherFull);
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = iw;
+  outCanvas.height = ih;
+  outCanvas.getContext("2d").putImageData(out, 0, 0);
+  const blob = await canvasToBlob(outCanvas, "image/png");
+  return { blob, width: iw, height: ih };
+}
+
+function bgOutName(entry) {
+  const prefix = safeRenameBase(bgPrefix ? bgPrefix.value : "nobg", "nobg");
+  const serial = String(bgResults.length + 1).padStart(3, "0");
+  return `${prefix}_${serial}_${safeRenameBase(entry.base, entry.base)}.png`;
+}
+
+async function runBgRemove(entriesToProcess) {
+  if (bgRunning || !entriesToProcess.length) return;
+  bgRunning = true;
+  syncBgControls();
+  renderBgSources();
+  if (bgProgress) {
+    bgProgress.hidden = entriesToProcess.length < 2;
+    bgProgressBar.max = entriesToProcess.length;
+    bgProgressBar.value = 0;
+    bgProgressText.textContent = `0 / ${entriesToProcess.length}`;
+  }
+  let completed = 0;
+  let failed = 0;
+  for (const entry of entriesToProcess) {
+    try {
+      setBgStatus(`${entry.originalName} 처리 중…`);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const result = await processBgEntryFullRes(entry);
+      const item = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        blob: result.blob,
+        url: URL.createObjectURL(result.blob),
+        file: bgOutName(entry),
+        width: result.width,
+        height: result.height,
+        date: Date.now(),
+      };
+      bgResults.push(item);
+      entry.done = true;
+      completed += 1;
+      if (bgAutoDownload && bgAutoDownload.checked) downloadBlobAs(item.blob, item.file);
+    } catch (error) {
+      failed += 1;
+    }
+    if (bgProgress && !bgProgress.hidden) {
+      bgProgressBar.value = completed + failed;
+      bgProgressText.textContent = `${completed + failed} / ${entriesToProcess.length}`;
+    }
+    renderBgResults();
+  }
+  bgRunning = false;
+  if (bgProgress) bgProgress.hidden = true;
+  renderBgSources();
+  syncBgControls();
+  setBgStatus(failed ? `배경 지우기 완료 · ${completed}개 (실패 ${failed}개)` : `배경 지우기 완료 · ${completed}개`);
+}
+
+function buildBgResultCard(item) {
+  const card = document.createElement("article");
+  card.className = "tile-card";
+  const image = document.createElement("img");
+  image.src = item.url;
+  image.alt = item.file;
+  image.className = "bg-tile-img";
+  const footer = document.createElement("div");
+  footer.className = "tile-footer";
+  const name = document.createElement("strong");
+  name.className = "tile-name";
+  name.textContent = item.file;
+  const dim = document.createElement("span");
+  dim.className = "tile-dim";
+  dim.textContent = `${item.width} × ${item.height}px`;
+  const actions = document.createElement("div");
+  actions.className = "tile-actions";
+  const link = document.createElement("a");
+  link.href = item.url;
+  link.download = item.file;
+  link.textContent = "저장";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "tile-remove";
+  remove.textContent = "삭제";
+  remove.addEventListener("click", () => {
+    if (bgRunning) return;
+    const index = bgResults.findIndex((result) => result.id === item.id);
+    if (index === -1) return;
+    URL.revokeObjectURL(bgResults[index].url);
+    bgResults.splice(index, 1);
+    renderBgResults();
+  });
+  actions.append(link, remove);
+  footer.append(name, dim, actions);
+  card.append(image, footer);
+  return card;
+}
+
+function renderBgResults() {
+  if (!bgResultGrid) return;
+  bgResultGrid.innerHTML = "";
+  bgResults.slice().reverse().forEach((item) => bgResultGrid.append(buildBgResultCard(item)));
+  const hasResults = bgResults.length > 0;
+  if (bgResultEmpty) bgResultEmpty.classList.toggle("is-hidden", hasResults);
+  if (bgResultCount) bgResultCount.textContent = `${bgResults.length}개`;
+  if (bgResultHint) bgResultHint.textContent = hasResults ? `배경 지운 파일 ${bgResults.length}개 · 투명 PNG` : "적용한 파일이 여기에 표시됩니다 · 투명 PNG로 저장돼요";
+  syncBgControls();
+}
+
+function clearBgResults() {
+  if (bgRunning || !bgResults.length) return;
+  bgResults.forEach((item) => URL.revokeObjectURL(item.url));
+  bgResults = [];
+  bgEntries.forEach((entry) => (entry.done = false));
+  renderBgResults();
+  renderBgSources();
+  setBgStatus("결과를 비웠어요");
+}
+
+async function downloadBgZip() {
+  if (!bgResults.length) return;
+  setBgStatus("ZIP 생성 중…");
+  const used = new Map();
+  const files = [];
+  for (const item of bgResults) {
+    let name = item.file;
+    if (used.has(name)) {
+      const count = used.get(name) + 1;
+      used.set(name, count);
+      const parts = splitFileName(name);
+      name = `${parts.base}_${count}${parts.ext}`;
+    } else {
+      used.set(name, 1);
+    }
+    files.push({ name, bytes: new Uint8Array(await item.blob.arrayBuffer()) });
+  }
+  downloadBlobAs(makeZip(files), `background-removed_${formatDownloadStamp()}.zip`);
+  setBgStatus(`${files.length}개 파일을 ZIP으로 저장했어요`);
+}
+
+if (bgSourceInput) {
+  bgSourceInput.addEventListener("change", (event) => {
+    addBgFiles(event.target.files);
+    bgSourceInput.value = "";
+  });
+  wireBatchDropzone(bgSourceDropzone, addBgFiles);
+
+  bgModeSeg.querySelectorAll(".seg-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      bgSettings.mode = button.dataset.bgmode;
+      bgModeSeg.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("is-active", b === button));
+      if (bgModeNote) {
+        bgModeNote.textContent = bgSettings.mode === "edge"
+          ? "가장자리와 연결된 배경만 지워, 안쪽 무늬는 남겨요."
+          : "화면 전체에서 지울 색과 비슷한 부분을 모두 지워요.";
+      }
+      scheduleBgPreview();
+    });
+  });
+
+  bgFillSeg.querySelectorAll(".seg-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      bgSettings.fill = button.dataset.bgfill;
+      bgFillSeg.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("is-active", b === button));
+      if (bgFillColorLine) bgFillColorLine.hidden = bgSettings.fill !== "custom";
+      scheduleBgPreview();
+    });
+  });
+
+  if (bgFillColor) {
+    bgFillColor.addEventListener("input", () => {
+      bgSettings.fillColor = bgFillColor.value;
+      if (bgSettings.fill === "custom") scheduleBgPreview();
+    });
+  }
+
+  bgTolerance.addEventListener("input", () => {
+    bgSettings.tolerance = clampNumber(bgTolerance.value, 1, 100, 32);
+    syncBgSliderLabels();
+    scheduleBgPreview();
+  });
+  bgFeather.addEventListener("input", () => {
+    bgSettings.feather = clampNumber(bgFeather.value, 0, 8, 2);
+    syncBgSliderLabels();
+    scheduleBgPreview();
+  });
+
+  bgAutoBtn.addEventListener("click", bgAutoDetect);
+  bgResetSettings.addEventListener("click", resetBgSettings);
+  bgApplyOne.addEventListener("click", () => {
+    const entry = bgEntries[bgSelectedIndex];
+    if (entry) runBgRemove([entry]);
+  });
+  bgApplyAll.addEventListener("click", () => runBgRemove(bgEntries.slice()));
+  bgDownloadAll.addEventListener("click", downloadBgZip);
+  bgClearResults.addEventListener("click", clearBgResults);
+
+  bgPreviewCanvas.addEventListener("click", (event) => {
+    if (!bgRunning) bgPickColorAt(event.clientX, event.clientY);
+  });
+
+  window.addEventListener("resize", () => {
+    if (currentViewName === "bgremove") scheduleBgPreview();
+  });
+}
+
+/* ============================================================
    사용 방법 — 움직이는(애니메이션) 안내 데모
    ============================================================ */
 const howtoFab = document.getElementById("howtoFab");
@@ -4329,6 +5014,33 @@ const HOWTO = {
         <text x="232" y="159" font-size="12" font-weight="800" fill="#16a34a">0.6MB</text></g>
     </svg>`,
   },
+  bgremove: {
+    title: "배경 지우기",
+    steps: [
+      "배경을 지울 이미지를 올려요.",
+      "미리보기에서 배경을 클릭하거나 ‘모서리 자동’으로 지울 색을 정하고, 허용 범위를 조절해요.",
+      "‘이 사진 적용’ 또는 ‘모든 사진 적용’으로 투명 PNG를 만들어요.",
+    ],
+    svg: `<svg viewBox="0 0 320 190" class="ho-svg" role="img" aria-label="배경 지우기 미리보기">
+      ${HOWTO_PHOTO_DEFS}
+      <rect x="26" y="24" width="128" height="142" rx="12" fill="url(#hoPhoto)" />
+      ${howtoScenery(26, 24, 128, 142)}
+      <circle cx="90" cy="92" r="26" fill="#fca5a5" />
+      <g class="ho-cursor" style="--x:70px"><path d="M0 0 L0 19 L5 14 L9 22 L13 20 L9 13 L16 13 Z" fill="#1f2330" stroke="#fff" stroke-width="1.3" /></g>
+      <g class="ho-result">
+        <rect x="190" y="40" width="108" height="110" rx="12" fill="#ffffff" />
+        <g fill="#e7e9f2">
+          <rect x="190" y="40" width="18" height="18" /><rect x="226" y="40" width="18" height="18" /><rect x="262" y="40" width="18" height="18" />
+          <rect x="208" y="58" width="18" height="18" /><rect x="244" y="58" width="18" height="18" /><rect x="280" y="58" width="18" height="18" />
+          <rect x="190" y="76" width="18" height="18" /><rect x="226" y="76" width="18" height="18" /><rect x="262" y="76" width="18" height="18" />
+          <rect x="208" y="94" width="18" height="18" /><rect x="244" y="94" width="18" height="18" /><rect x="280" y="94" width="18" height="18" />
+          <rect x="190" y="112" width="18" height="18" /><rect x="226" y="112" width="18" height="18" /><rect x="262" y="112" width="18" height="18" />
+          <rect x="208" y="130" width="18" height="18" /><rect x="244" y="130" width="18" height="18" /><rect x="280" y="130" width="18" height="18" />
+        </g>
+        <circle cx="244" cy="95" r="26" fill="#fca5a5" />
+      </g>
+    </svg>`,
+  },
 };
 
 function updateHowtoFab() {
@@ -4409,6 +5121,11 @@ document.addEventListener("keydown", (event) => {
   renderBatchCropSources();
   renderBatchCropResults();
   syncBatchCropControls();
+  renderBgSources();
+  renderBgChips();
+  renderBgResults();
+  syncBgSliderLabels();
+  syncBgControls();
   syncControls();
   updateHowtoFab();
   resizeCanvasToStage();
